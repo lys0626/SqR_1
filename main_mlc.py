@@ -57,7 +57,7 @@ def parser_args():
     # --- [新增] Momentum 参数 (SGD用) ---
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                         help='momentum')
-    # loss
+    # ASL loss
     parser.add_argument('--eps', default=1e-5, type=float,
                         help='eps for focal loss (default: 1e-5)')
     parser.add_argument('--dtgfl', action='store_true', default=False, 
@@ -231,7 +231,11 @@ def main_worker(args, logger):
     model = build_q2l(args)
     model = model.cuda()
     ema_m = ModelEma(model, args.ema_decay) # 0.9997 实现模型参数的指数平均移动，不参与反向传播也不会被优化器直接更新，
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], broadcast_buffers=False)
+    model = torch.nn.parallel.DistributedDataParallel(model,
+                                                       device_ids=[args.local_rank],
+                                                         broadcast_buffers=False,
+                                                         find_unused_parameters=True  # <--- 必须加，单卡也得加
+                                                         )
 
     # --- [修改] Criterion ---
     # 使用 BCEWithLogitsLoss 替代 ASL
@@ -240,31 +244,31 @@ def main_worker(args, logger):
     # optimizer
     # --- [修改] Optimizer: 支持参数分组和 SGD ---
     args.lr_mult = args.batch_size / 256
-    base_lr = args.lr_mult * args.lr
-
-    # 1. 参数分组：Backbone 学习率 x0.1，其他部分 x1.0
+    # base_lr = args.lr_mult * args.lr
+    base_lr = args.lr
+    # 1. 参数分组：Backbone与Splicemix分支的分类器 学习率x1，其他部分 x0.1
     backbone_params = []
     other_params = []
     for name, param in model.module.named_parameters():
         if not param.requires_grad:
             continue
         # 根据 Query2Label 的定义，Backbone 属性名为 'backbone'
-        if 'backbone' in name:
+        if 'backbone' in name or 'fc_splicemix' in name:
             backbone_params.append(param)
         else:
             other_params.append(param)
     # 打印分组信息确认
     if args.rank == 0:
-        logger.info(f"Optimizer Grouping: {len(backbone_params)} backbone params (lr*0.1), {len(other_params)} other params (lr*1.0)")
+        logger.info(f"Optimizer Grouping: {len(backbone_params)} backbone params (lr1), {len(other_params)} other params (lr*0.1)")
 
     param_dicts = [
         {
             "params": backbone_params, 
-            "lr": base_lr * 0.1  # Backbone 使用较小的学习率
+            "lr": base_lr* 2    # Backbone与fc_Splicemix使用的学习率
         },
         {
             "params": other_params, 
-            "lr": base_lr        # 其他部分 (Transformer, FC, Heads) 使用基础学习率
+            "lr": base_lr       # 其他部分 (Transformer, FC, Heads) 使用基础学习率
         },
     ]
     #初始化优化器
@@ -505,8 +509,8 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         # B. 分支 1: SpliceMix 增强分支 (仅处理 Clean 样本，训练 GAP Head)
         # ------------------------------------------------------------------
         loss_splicemix_branch = torch.tensor(0.0).cuda()
-        
-        if args.enable_splicemix and len(clean_idxs) > 1:
+        #必须有4张干净图才能组成一个2x2的网格   
+        if args.enable_splicemix and len(clean_idxs) > 4:
             images_clean = images[clean_idxs]
             targets_clean = target[clean_idxs]
             
@@ -587,7 +591,7 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         # --- D. 总 Loss ---
         final_loss = 0.0
         branch_count = 0
-        if args.enable_splicemix and len(clean_idxs) > 1:
+        if args.enable_splicemix and len(clean_idxs) > 4:
             final_loss += loss_splicemix_branch
             branch_count += 1
         if valid_parts > 0:
@@ -600,6 +604,13 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         # Backprop
         optimizer.zero_grad()
         scaler.scale(final_loss).backward()
+        # --- [新增] 梯度裁剪 (关键修复) ---
+        # 在 step 之前，必须先 unscale 梯度
+        # scaler.unscale_(optimizer)
+        # 对 Transformer 结构，max_norm 通常设为 0.1 或 1.0
+        #如果Loss下降的很慢，可以将max_norm稍微调大例如1或5，接近NaN问题0.1是最安全的选项
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+        # -------------------------------
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
