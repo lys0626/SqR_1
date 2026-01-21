@@ -38,7 +38,11 @@ from lib.utils.slconfig import get_raw_dict
 # 假设这些文件都在根目录下
 from rolt_handler import RoLT_Handler
 from SpliceMix import SpliceMix
-
+# --- [新增] 时间格式化辅助函数 ---
+def sec_to_str(seconds):
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    return f"{m:02d}:{s:02d}"
 def parser_args():
     parser = argparse.ArgumentParser(description='Query2Label MSCOCO Training')
     parser.add_argument('--dataname', help='dataname', default='coco14', choices=['coco14', 'mimic', 'nih'])
@@ -54,6 +58,14 @@ def parser_args():
                         help='use pre-trained model. default is False. ')
     parser.add_argument('--optim', default='SGD', type=str, choices=['AdamW', 'Adam_twd', 'SGD'],
                         help='which optim to use')
+    # --- [新增] 学习率调度器参数 ---
+    parser.add_argument('--scheduler', default='StepLR', type=str, choices=['OneCycle', 'StepLR'],
+                        help='Which scheduler to use: OneCycle (default) or StepLR')
+    parser.add_argument('--step_size', default=40, type=int,
+                        help='Period of learning rate decay (epochs) for StepLR')
+    parser.add_argument('--gamma', default=0.1, type=float,
+                        help='Multiplicative factor of learning rate decay for StepLR')
+    # -----------------------------
     # --- [新增] Momentum 参数 (SGD用) ---
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                         help='momentum')
@@ -246,7 +258,7 @@ def main_worker(args, logger):
     args.lr_mult = args.batch_size / 256
     # base_lr = args.lr_mult * args.lr
     base_lr = args.lr
-    # 1. 参数分组：Backbone与Splicemix分支的分类器 学习率x1，其他部分 x0.1
+    # 1. 参数分组：Backbone与Splicemix分支的分类器 学习率x1，其他部分x0.1
     backbone_params = []
     other_params = []
     for name, param in model.module.named_parameters():
@@ -264,11 +276,11 @@ def main_worker(args, logger):
     param_dicts = [
         {
             "params": backbone_params, 
-            "lr": base_lr* 2    # Backbone与fc_Splicemix使用的学习率
+            "lr": base_lr    # Backbone与fc_Splicemix使用的学习率
         },
         {
             "params": other_params, 
-            "lr": base_lr       # 其他部分 (Transformer, FC, Heads) 使用基础学习率
+            "lr": base_lr*0.1       # 其他部分 (Transformer, FC, Heads) 使用基础学习率
         },
     ]
     #初始化优化器
@@ -370,7 +382,38 @@ def main_worker(args, logger):
         [eta, epoch_time, losses, mAUCs],
         prefix='=> Test Epoch: ')
 
-    scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs, pct_start=0.2)
+    # -------------------------------------------------------------------------
+    # [修改] 动态选择学习率调度器 (Scheduler)
+    # -------------------------------------------------------------------------
+    # args.step_per_batch 是一个我们动态添加的属性 (Flag)，
+    # 用于告诉后面的 train 函数：这个调度器是该每个 Batch 更新 (如 OneCycle)，还是每个 Epoch 更新 (如 StepLR)。
+    
+    if args.scheduler == 'OneCycle':
+        # [原有逻辑] OneCycleLR: 需要在每个 Batch 结束后更新 (step)
+        scheduler = lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=args.lr, 
+            steps_per_epoch=len(train_loader), 
+            epochs=args.epochs, 
+            pct_start=0.2
+        )
+        args.step_per_batch = True # 标记：Batch 级更新
+
+    elif args.scheduler == 'StepLR':
+        # [新增逻辑] StepLR: 只需要在每个 Epoch 结束后更新 (step)
+        # step_size: 多少个 epoch 衰减一次
+        # gamma: 衰减倍率 (例如 0.1 表示变为原来的 10%)
+        scheduler = lr_scheduler.StepLR(
+            optimizer, 
+            step_size=args.step_size, 
+            gamma=args.gamma
+        )
+        args.step_per_batch = False # 标记：Epoch 级更新
+
+    else:
+        # 防御性编程：如果传入了未实现的调度器名称，抛出错误
+        raise NotImplementedError("Scheduler {} not implemented".format(args.scheduler))
+    # -------------------------------------------------------------------------
 
     end = time.time()
     best_epoch = -1
@@ -392,7 +435,10 @@ def main_worker(args, logger):
         # 传入所有必要的组件
         loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger,
                      splicemix_augmentor, clean_mask_dict, soft_label_dict)
-
+        # --- [新增] 如果是 StepLR，需要在 Epoch 结束时更新 ---
+        if not args.step_per_batch:
+            scheduler.step()
+        # ------------------------------------------------
         if summary_writer:
             summary_writer.add_scalar('train_loss', loss, epoch)
             summary_writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
@@ -613,7 +659,10 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         # -------------------------------
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()
+        # --- [修改] 仅当使用 OneCycleLR 等需要 per-batch 更新的调度器时才执行 ---
+        if args.step_per_batch:
+            scheduler.step()
+        # -------------------------------------------------------------------
 
         if epoch >= args.ema_epoch:
             ema_m.update(model)
