@@ -215,7 +215,7 @@ class RoLT_Handler:
         noisy_counts = ((~label_clean_matrix) & valid_pos_mask).sum(dim=1)
         
         # 执行判定
-        is_sample_clean = clean_counts > (noisy_counts + 1)
+        is_sample_clean = clean_counts > noisy_counts
         
         # 统计结果
         num_clean = is_sample_clean.sum().item()

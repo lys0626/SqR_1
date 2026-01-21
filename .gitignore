@@ -21,3 +21,4 @@ subs
 tmp
 *.sub
 __pycache__
+experiment

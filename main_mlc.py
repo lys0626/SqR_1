@@ -347,7 +347,7 @@ def main_worker(args, logger):
 
     # --- [新增] 初始化 SpliceMix ---
     if args.splicemix_mode == 'SpliceMix-CL':
-        splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2', '2x3-2'], n_grids=[0], mix_prob=args.splicemix_prob)
+        splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
     else:
         splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
     splicemix_augmentor = splicemix_obj.mixer
@@ -378,7 +378,12 @@ def main_worker(args, logger):
         # --- [RoLT 核心逻辑] ---
         # 冻结模型 -> 清洗数据 -> 生成软标签
         clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
-
+        # =========================================================
+        # [关键修复] 必须显式解冻模型参数，否则 loss.backward() 会报错
+        # =========================================================
+        model.train()  # 切换回训练模式 (启用 Dropout/BN)
+        for param in model.parameters():
+            param.requires_grad = True  # 开启梯度计算
         # --- [训练逻辑] ---
         # 传入所有必要的组件
         loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger,
@@ -559,9 +564,16 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             # C.2 噪声样本 -> 软伪标签 Loss (RoLT 生成)
             if len(noisy_idxs) > 0:
                 soft_targets_list = []
-                for idx in indices[noisy_idxs]:
-                    # 获取软标签
-                    s_label = soft_label_dict.get(idx.item(), target[torch.where(indices==idx)[0][0]])
+                # [优化前]
+                # for idx in indices[noisy_idxs]:
+                #     s_label = soft_label_dict.get(idx.item(), target[torch.where(indices==idx)[0][0]])
+                #     soft_targets_list.append(s_label)
+                
+                # [优化后] 直接遍历 noisy_idxs (它是 batch 内的下标，如 0, 3, 5...)
+                for k in noisy_idxs:
+                    global_idx = indices[k].item() # 获取该样本在整个数据集中的全局ID
+                    # 尝试从字典取软标签，取不到则用原始 target[k]
+                    s_label = soft_label_dict.get(global_idx, target[k])
                     soft_targets_list.append(s_label)
                 soft_targets = torch.stack(soft_targets_list).to(images.device)
                 loss_noisy = criterion(out_trans_all[noisy_idxs], soft_targets)

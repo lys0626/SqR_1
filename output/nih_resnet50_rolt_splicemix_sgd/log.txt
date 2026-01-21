@@ -1,9 +1,0 @@
-[01/20 21:58:30.130]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --img_size 224 --num_class 14 --backbone resnet50 --output ./output/nih_resnet50_rolt_splicemix_sgd --batch-size 32 --workers 8 --epochs 50 --start-epoch 0 --pretrained --optim SGD --lr 0.1 --momentum 0.9 --wd 1e-4 --amp --enable_splicemix --splicemix_prob 1 --val_interval 1
-[01/20 21:58:30.130]: Full config saved to ./output/nih_resnet50_rolt_splicemix_sgd/config.json
-[01/20 21:58:34.040]: Optimizer Grouping: 42 backbone params (lr*0.1), 43 other params (lr*1.0)
-[01/20 22:05:05.009]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --img_size 224 --num_class 14 --backbone resnet50 --output ./output/nih_resnet50_rolt_splicemix_sgd --batch-size 32 --workers 8 --epochs 50 --start-epoch 0 --pretrained --optim SGD --lr 0.1 --momentum 0.9 --wd 1e-4 --amp --enable_splicemix --splicemix_prob 1 --val_interval 1
-[01/20 22:05:05.053]: Full config saved to ./output/nih_resnet50_rolt_splicemix_sgd/config.json
-[01/20 22:05:07.221]: Optimizer Grouping: 42 backbone params (lr*0.1), 43 other params (lr*1.0)
-[01/20 22:09:19.740]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --img_size 224 --num_class 14 --backbone resnet50 --output ./output/nih_resnet50_rolt_splicemix_sgd --batch-size 32 --workers 8 --epochs 50 --start-epoch 0 --pretrained --optim SGD --lr 0.1 --momentum 0.9 --wd 1e-4 --amp --enable_splicemix --splicemix_prob 1 --keep_input_proj
-[01/20 22:09:19.777]: Full config saved to ./output/nih_resnet50_rolt_splicemix_sgd/config.json
-[01/20 22:09:21.979]: Optimizer Grouping: 42 backbone params (lr*0.1), 45 other params (lr*1.0)
