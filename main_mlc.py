@@ -83,7 +83,7 @@ def parser_args():
     parser.add_argument('--loss_clip', default=0.0, type=float,
                                             help='scale factor for clip')  
 
-    parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
+    parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                         help='number of data loading workers (default: 32)')
     parser.add_argument('--epochs', default=80, type=int, metavar='N',
                         help='number of total epochs to run')
@@ -280,7 +280,7 @@ def main_worker(args, logger):
         },
         {
             "params": other_params, 
-            "lr": base_lr*0.1       # 其他部分 (Transformer, FC, Heads) 使用基础学习率
+            "lr": base_lr/2      # 其他部分 (Transformer, FC, Heads) 使用基础学习率
         },
     ]
     #初始化优化器
@@ -312,6 +312,7 @@ def main_worker(args, logger):
         raise NotImplementedError
 
     # tensorboard
+    #控制日志记录的权限
     if dist.get_rank() == 0:
         summary_writer = SummaryWriter(log_dir=args.output)
     else:
@@ -357,7 +358,9 @@ def main_worker(args, logger):
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
     if args.evaluate:
-        mAUC = validate(val_loader, model, criterion, args, logger)
+        # [修改] 接收元组，提取 mAUC
+        metrics_res, _ = validate(val_loader, model, criterion, args, logger)
+        mAUC = metrics_res['mAUC']
         logger.info(' * mAUC {mAUC:.5f}'.format(mAUC=mAUC))
         return
 
@@ -413,60 +416,133 @@ def main_worker(args, logger):
     else:
         # 防御性编程：如果传入了未实现的调度器名称，抛出错误
         raise NotImplementedError("Scheduler {} not implemented".format(args.scheduler))
-    # -------------------------------------------------------------------------
-
+    
+    # 记录一些统计变量
+    losses = AverageMeter('Loss', ':5.3f', val_only=True)
+    mAUCs = AverageMeter('mAUC', ':5.5f', val_only=True)
+    best_epoch = -1
     end = time.time()
     best_epoch = -1
     
+    # ================= [替换] 整个训练循环 =================
     for epoch in range(args.start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         torch.cuda.empty_cache()
 
-        # --- [RoLT 核心逻辑] ---
-        # 冻结模型 -> 清洗数据 -> 生成软标签
+        # --- 1. RoLT 数据清洗与统计 ---
         clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
-        # =========================================================
-        # [关键修复] 必须显式解冻模型参数，否则 loss.backward() 会报错
-        # =========================================================
-        model.train()  # 切换回训练模式 (启用 Dropout/BN)
+        
+        n_total = len(train_dataset)
+        if len(clean_mask_dict) == 0:
+            n_clean = n_total
+        else:
+            # 统计 False (Noisy) 的数量，剩下的就是 Clean
+            n_noisy_count = sum(1 for v in clean_mask_dict.values() if v is False)
+            n_clean = n_total - n_noisy_count
+
+        # 确保模型可训练
+        model.train()
         for param in model.parameters():
-            param.requires_grad = True  # 开启梯度计算
-        # --- [训练逻辑] ---
-        # 传入所有必要的组件
+            param.requires_grad = True
+        
+        # --- 2. 训练阶段 ---
+        train_start = time.time()
+        
+        # 调用 train 函数
         loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger,
                      splicemix_augmentor, clean_mask_dict, soft_label_dict)
-        # --- [新增] 如果是 StepLR，需要在 Epoch 结束时更新 ---
-        if not args.step_per_batch:
+        
+        train_duration = sec_to_str(time.time() - train_start)
+
+        # [关键] StepLR 必须在 Epoch 结束时更新
+        # args.step_per_batch 是你在调度器部分定义的变量
+        if not getattr(args, 'step_per_batch', True):
             scheduler.step()
-        # ------------------------------------------------
+
+        # 获取学习率 (用于打印)
+        current_lrs = [param_group['lr'] for param_group in optimizer.param_groups]
+        lr_str = " ".join([f"{lr:.5g}" for lr in current_lrs])
+        
+        # [日志格式 1] Train Log
+        # 样例: [Epoch 17, lr[0.005 0.05 ]] [Train] time:02:34s, loss: 0.1927 .
+        if args.rank == 0:
+            logger.info(f"[Epoch {epoch}, lr[{lr_str} ]] [Train] time:{train_duration}s, loss: {loss:.4f} .")
+        
         if summary_writer:
             summary_writer.add_scalar('train_loss', loss, epoch)
-            summary_writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
+            summary_writer.add_scalar('learning_rate', current_lrs[0], epoch)
 
+        # --- 3. 验证阶段 ---
         if epoch % args.val_interval == 0:
-            # evaluate
-            mAUC = validate(val_loader, model, criterion, args, logger)
-            # EMA model validation (Optional, based on requirement)
-            mAUC_ema = validate(val_loader, ema_m.module, criterion, args, logger)
+            val_start = time.time()
+            
+            # validate 返回 (metrics_res, val_loss) -> 需要下一步修改 validate 函数
+            metrics_res, val_loss = validate(val_loader, model, criterion, args, logger)
+            
+            # EMA 模型验证 (可选)
+            metrics_res_ema, _ = validate(val_loader, ema_m.module, criterion, args, logger)
+            
+            val_duration = sec_to_str(time.time() - val_start)
+
+            # 提取指标
+            mAUC = metrics_res['mAUC']
+            mi_f1, ma_f1 = metrics_res['micro_F1'], metrics_res['macro_F1']
+            mi_p, ma_p = metrics_res['micro_P'], metrics_res['macro_P']
+            mi_r, ma_r = metrics_res['micro_R'], metrics_res['macro_R']
 
             losses.update(loss)
             mAUCs.update(mAUC)
-            
-            epoch_time.update(time.time() - end)
-            end = time.time()
-            eta.update(epoch_time.avg * (args.epochs - epoch - 1))
-            progress.display(epoch, logger)
-
-            if summary_writer:
-                summary_writer.add_scalar('val_mAUC', mAUC, epoch)
 
             is_best = mAUC > best_mAUC
             if is_best:
                 best_epoch = epoch
             best_mAUC = max(mAUC, best_mAUC)
 
-            logger.info("{} | Set best mAUC {} in ep {}".format(epoch, best_mAUC, best_epoch))
+            # [日志格式 2] Test Log
+            timestamp = datetime.datetime.now().strftime('%m-%d %H:%M:%S')
+            log_prefix = f"[{args.rank}|{timestamp}]"
+            
+            if args.rank == 0:
+                logger.info(
+                    f"{log_prefix}: [Test] time: {val_duration}s, loss: {val_loss:.4f}, "
+                    f"mAUC: {mAUC:.4f}, miF1: {mi_f1:.4f}, maF1: {ma_f1:.4f}, "
+                    f"miP: {mi_p:.4f}, maP: {ma_p:.4f} ."
+                )
 
+            # [日志格式 3] Best Result Log
+            if args.rank == 0:
+                logger.info(f"{log_prefix}: --[Test-best] (E{best_epoch}), mAUC: {best_mAUC:.4f}")
+
+            if summary_writer:
+                summary_writer.add_scalar('val_mAUC', mAUC, epoch)
+                summary_writer.add_scalar('val_loss', val_loss, epoch)
+
+            # --- 4. 写入 log.txt ---
+            if args.rank == 0:
+                log_txt_path = os.path.join(args.output, 'log.txt')
+                
+                lr_backbone = current_lrs[0]
+                lr_head = current_lrs[1] if len(current_lrs) > 1 else current_lrs[0]
+                
+                with open(log_txt_path, 'a') as f:
+                    # [新增] 每次写数据前，都先写一遍表头
+                    # 建议在表头前加个换行符 \n，让视觉上更清晰
+                    header = (
+                        "\nEpoch\tTrain_Loss\tVal_Loss\tVal_mAUC\t"
+                        "mi_F1\tma_F1\tmi_R\tma_R\tmi_P\tma_P\t"
+                        "Clean_S\tTotal_S\tLR_Backbone\tLR_Head\n"
+                    )
+                    f.write(header)
+                    
+                    # 写数据
+                    log_line = (
+                        f"{epoch}\t{loss:.5f}\t{val_loss:.5f}\t{mAUC:.5f}\t"
+                        f"{mi_f1:.5f}\t{ma_f1:.5f}\t{mi_r:.5f}\t{ma_r:.5f}\t{mi_p:.5f}\t{ma_p:.5f}\t"
+                        f"{n_clean}\t{n_total}\t{lr_backbone:.8f}\t{lr_head:.8f}\n"
+                    )
+                    f.write(log_line)
+
+            # 保存 Checkpoint
             if dist.get_rank() == 0:
                 save_checkpoint({
                     'epoch': epoch + 1,
@@ -476,14 +552,10 @@ def main_worker(args, logger):
                     'optimizer' : optimizer.state_dict(),
                 }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint.pth.tar'))
 
+            # Early Stop
             if args.early_stop:
                 if best_epoch >= 0 and epoch - best_epoch > 8:
                     break
-
-    print("Best mAUC:", best_mAUC)
-    if summary_writer:
-        summary_writer.close()
-    return 0
 
 def compute_consistency_target(preds_original, flag, device):
     """
@@ -675,33 +747,30 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
 
 @torch.no_grad()
 def validate(val_loader, model, criterion, args, logger):
-    # 使用新的 Meter
+    #AveragePrecisionMeter自定义类，用于累积预测结果并计算mAP/mAUC等指标，False代表不考虑数据集中标记为困难的样本，在mimic和nih数据集中无效
     meter = AveragePrecisionMeter(difficult_examples=False)
-    batch_time = AverageMeter('Time', ':5.3f')
+    losses = AverageMeter('Loss', ':5.3f') # 用于记录验证集 Loss
     
     model.eval()
-    end = time.time()
     
-    for i, (images, target, _) in enumerate(val_loader): # 假设 Val 也返回了 index，用 _ 忽略
+    for i, (images, target, _) in enumerate(val_loader): 
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
-
+        #混合精度上下文
         with torch.cuda.amp.autocast(enabled=args.amp):
+            #在这里是取Splicemix分支fc的预测结果，如果想去Q2L分支的预测结果应该采用output, _, _ = model(images)
             _, _, output = model(images)
-            # 添加到 Metric
+            # [新增] 计算 Loss
+            loss = criterion(output, target)
+            losses.update(loss.item(), images.size(0))
+            
             meter.add(output, target, filename=[]) 
 
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-    # 计算结果
-    logger.info('=> synchronize...')
-    # 注意：如果多卡，这里的 Metric 需要 gather，简化起见假设单卡或只在 rank0 打印
-    # 严格的多卡 Metric gather 比较复杂，这里暂时略过，直接计算
+    # 获取所有指标
     metrics_res = meter.compute_all_metrics()
-    mAUC = metrics_res['mAUC']
     
-    return mAUC
+    # [修改] 返回 (指标字典, 平均Loss)
+    return metrics_res, losses.avg
 
 # --- 工具类保持不变 ---
 def add_weight_decay(model, weight_decay=1e-4, skip_list=()):

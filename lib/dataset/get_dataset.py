@@ -7,6 +7,7 @@ import os.path as osp
 from utilities.mimic import mimic
 from utilities.nih import nihchest
 def get_datasets(args):
+    #对输入数据标准化的两种方式。如果开启它，模型输入的是[0,1]范围内的数据。如果关闭它模型输入的就是经过imageNet统计数据标准化后的数据
     if args.orid_norm:
         normalize = transforms.Normalize(mean=[0, 0, 0],
                                          std=[1, 1, 1])
