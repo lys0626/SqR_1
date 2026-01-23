@@ -180,7 +180,7 @@ def parser_args():
     # --- [新增] ResNet/SpliceMix 相关参数 ---
     parser.add_argument('--enable_splicemix', action='store_true', default=False,
                         help='Whether to enable SpliceMix augmentation')
-    parser.add_argument('--splicemix_prob', default=0.5, type=float,
+    parser.add_argument('--splicemix_prob', default=1, type=float,
                         help='Probability of applying SpliceMix')
     parser.add_argument('--splicemix_mode', default='SpliceMix', type=str,
                         choices=['SpliceMix', 'SpliceMix-CL'],
@@ -365,12 +365,18 @@ def main_worker(args, logger):
         return
 
     # --- [新增] 初始化 SpliceMix ---
+    #冗余代码
+    #n_grids = [0]  代表2x2拼接方式没有进行图像拼接
     if args.splicemix_mode == 'SpliceMix-CL':
         splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
     else:
         splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
     splicemix_augmentor = splicemix_obj.mixer
-
+    # if args.splicemix_mode == 'SpliceMix-CL':
+    #     splicemix_obj = SpliceMix(mode='SpliceMix', grids=['1x2','2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
+    # else:
+    #     splicemix_obj = SpliceMix(mode='SpliceMix', grids=['1x2','2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
+    # splicemix_augmentor = splicemix_obj.mixer
     # --- [新增] 初始化 RoLT Handler ---
     # args.num_class 和 args.hidden_dim 必须正确设置
     rolt_handler = RoLT_Handler(args, model, train_loader, args.num_class, args.hidden_dim)

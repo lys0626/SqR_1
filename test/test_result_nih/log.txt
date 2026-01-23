@@ -1,0 +1,18 @@
+[01/23 09:56:02.894]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_5e-5_1e-4/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 09:56:02.894]: Full config saved to ./test/test_result_nih/config.json
+[01/23 09:56:06.225]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 09:56:06.228]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_5e-5_1e-4/model_best.pth.tar'
+[01/23 09:56:07.600]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_5e-5_1e-4/model_best.pth.tar' (epoch 14)
+[01/23 09:57:38.834]:  * mAUC 0.81550
+[01/23 12:06:42.167]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 12:06:42.224]: Full config saved to ./test/test_result_nih/config.json
+[01/23 12:06:45.128]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 12:06:45.129]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar'
+[01/23 12:06:46.359]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar' (epoch 44)
+[01/23 12:07:18.637]:  * mAUC 0.81001
+[01/23 14:05:04.622]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 14:05:04.672]: Full config saved to ./test/test_result_nih/config.json
+[01/23 14:05:07.776]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 14:05:07.778]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar'
+[01/23 14:05:09.315]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar' (epoch 44)
+[01/23 14:05:41.945]:  * mAUC 0.81001

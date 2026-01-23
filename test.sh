@@ -2,8 +2,10 @@
 
 # ================= 配置区域 =================
 # 1. 指定使用的显卡 (例如使用第0号卡)
-export CUDA_VISIBLE_DEVICES=0
-
+export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
+export CUDA_VISIBLE_DEVICES=4
+export MASTER_ADDR='localhost'
+export MASTER_PORT='29500'
 # 2. 数据集设置
 DATASET="nih"               # 选项: nih, mimic, coco14
 DATA_DIR="/data/nih-chest-xrays" # [请修改] 你的数据集实际路径
@@ -16,7 +18,7 @@ BATCH_SIZE=128              # 测试时显存占用小，可以适当调大
 
 # 4. 权重文件路径 (必须指定)
 # [请修改] 指向你训练好的 checkpoint.pth.tar 文件
-RESUME="/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_-1/model_best.pth.tar"
+RESUME="/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar"
 
 # ================= 运行命令 =================
 echo "----------------------------------------------------------------"
@@ -33,8 +35,10 @@ python main_mlc.py \
     --batch-size ${BATCH_SIZE} \
     --resume ${RESUME} \
     -e \
-    --workers 8
-
+    --output ./test/test_result_nih \
+    --workers 8 \
+    --keep_input_proj \
+    --hidden_dim=1024
 # 注释说明:
 # -e : 开启评估模式 (evaluate)
 # --resume : 加载权重

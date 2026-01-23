@@ -54,12 +54,24 @@ def get_datasets(args):
     # 新增 MIMIC 支持
     elif args.dataname == 'mimic':
         train_dataset = mimic(root=args.dataset_dir, mode='train', transform=train_data_transform)
-        val_dataset = mimic(root=args.dataset_dir, mode='valid', transform=test_data_transform)
+        if args.evaluate:
+            print("!!! [Evaluation Mode] Loading TEST dataset (cxr14_test.csv) !!!")
+            # 如果是 -e 模式，让 val_dataset 实际上加载测试集
+            val_dataset = mimic(root=args.dataset_dir, mode='test', transform=test_data_transform)
+        else:
+            # 如果是训练模式，加载正常的验证集
+            val_dataset = mimic(root=args.dataset_dir, mode='valid', transform=test_data_transform)
         args.num_class = train_dataset.get_number_classes() # 自动设置类别数 (13)
     # 新增 NIH 支持
     elif args.dataname == 'nih':
         train_dataset = nihchest(root=args.dataset_dir, mode='train', transform=train_data_transform)
-        val_dataset = nihchest(root=args.dataset_dir, mode='valid', transform=test_data_transform)
+        if args.evaluate:
+            print("!!! [Evaluation Mode] Loading TEST dataset (cxr14_test.csv) !!!")
+            # 如果是 -e 模式，让 val_dataset 实际上加载测试集
+            val_dataset = nihchest(root=args.dataset_dir, mode='test', transform=test_data_transform)
+        else:
+            # 如果是训练模式，加载正常的验证集
+            val_dataset = nihchest(root=args.dataset_dir, mode='valid', transform=test_data_transform)
         args.num_class = train_dataset.get_number_classes() # 自动设置类别数 (14)
     else:
         raise NotImplementedError("Unknown dataname %s" % args.dataname)

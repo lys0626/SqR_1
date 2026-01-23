@@ -4,13 +4,13 @@ export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
 # --- [新增] 设置分布式训练的主节点信息 (单机训练必须配置) ---
 export CUDA_VISIBLE_DEVICES=7
 export MASTER_ADDR='localhost'
-export MASTER_PORT='12352'
+export MASTER_PORT='12353'
 # --- 配置区域 ---
 # 数据集名称: mimic 或 nih
 DATANAME="nih"
 DATA_DIR="/data/nih-chest-xrays"
 # 输出目录
-OUTPUT_DIR="./experiment/${DATANAME}_Splicemix_1024_4_2"
+OUTPUT_DIR="./experiment/${DATANAME}_Splicemix_1024_4_-2_continue"
 # 类别数 (MIMIC-CXR通常是13或14，NIH是14，请根据实际情况修改)
 NUM_CLASS=14
 # 显卡ID
@@ -32,8 +32,8 @@ python main_mlc.py \
   --epochs 100 \
   --start-epoch 0 \
   --pretrained \
-  --optim SGD \
-  --lr 0.05 \
+  --optim Adamw \
+  --lr 5e-5 \
   --momentum 0.9 \
   --wd 1e-4 \
   --amp \
@@ -41,5 +41,6 @@ python main_mlc.py \
   --splicemix_prob 1 \
   --keep_input_proj \
   --hidden_dim 1024 \
-  --dec_layers 4\
+  --dec_layers 4 \
+  --enc_layers 1 \
   --scheduler StepLR
