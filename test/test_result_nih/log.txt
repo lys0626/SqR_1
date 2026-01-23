@@ -16,3 +16,39 @@
 [01/23 14:05:07.778]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar'
 [01/23 14:05:09.315]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_AdamW_1024_4_-2_128_1e-5_1e-4/model_best.pth.tar' (epoch 44)
 [01/23 14:05:41.945]:  * mAUC 0.81001
+[01/23 17:06:05.940]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-3_128_0.05/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:06:05.984]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:06:08.995]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:06:08.998]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-3_128_0.05/model_best.pth.tar'
+[01/23 17:06:09.920]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-3_128_0.05/model_best.pth.tar' (epoch 10)
+[01/23 17:06:42.679]:  * mAUC 0.80075
+[01/23 17:07:39.639]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_2_-3_128_0.05/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:07:39.696]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:07:42.471]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:07:42.472]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_2_-3_128_0.05/model_best.pth.tar'
+[01/23 17:07:43.083]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_2_-3_128_0.05/model_best.pth.tar' (epoch 11)
+[01/23 17:08:15.442]:  * mAUC 0.79966
+[01/23 17:10:21.721]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:10:21.761]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:10:24.558]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:10:24.560]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar'
+[01/23 17:10:25.295]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar' (epoch 75)
+[01/23 17:10:57.934]:  * mAUC 0.79857
+[01/23 17:14:36.256]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:14:36.305]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:14:39.039]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:14:39.040]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2/model_best.pth.tar'
+[01/23 17:14:39.834]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2/model_best.pth.tar' (epoch 98)
+[01/23 17:15:12.295]:  * mAUC 0.80150
+[01/23 17:15:39.701]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2_continue/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:15:39.742]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:15:42.588]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:15:42.591]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2_continue/model_best.pth.tar'
+[01/23 17:15:43.470]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix_1024_4_-2_continue/model_best.pth.tar' (epoch 134)
+[01/23 17:16:15.762]:  * mAUC 0.80199
+[01/23 17:17:58.678]: Command: main_mlc.py --dataname nih --dataset_dir /data/nih-chest-xrays --num_class 14 --img_size 224 --backbone resnet50 --batch-size 128 --resume /data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar -e --output ./test/test_result_nih --workers 8 --keep_input_proj --hidden_dim=1024
+[01/23 17:17:58.742]: Full config saved to ./test/test_result_nih/config.json
+[01/23 17:18:01.484]: Optimizer Grouping: 44 backbone params (lr1), 43 other params (lr*0.1)
+[01/23 17:18:01.486]: => loading checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar'
+[01/23 17:18:02.256]: => loaded checkpoint '/data/dsj/lys/SqR-main/experiment/nih_Splicemix__1024_2_2_-2_128/model_best.pth.tar' (epoch 75)
+[01/23 17:18:34.612]:  * mAUC 0.79857

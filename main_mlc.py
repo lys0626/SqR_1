@@ -366,7 +366,6 @@ def main_worker(args, logger):
 
     # --- [新增] 初始化 SpliceMix ---
     #冗余代码
-    #n_grids = [0]  代表2x2拼接方式没有进行图像拼接
     if args.splicemix_mode == 'SpliceMix-CL':
         splicemix_obj = SpliceMix(mode='SpliceMix', grids=['2x2'], n_grids=[0], mix_prob=args.splicemix_prob)
     else:
