@@ -395,12 +395,14 @@ def main_worker(args, logger):
     # -------------------------------------------------------------------------
     # args.step_per_batch 是一个我们动态添加的属性 (Flag)，
     # 用于告诉后面的 train 函数：这个调度器是该每个 Batch 更新 (如 OneCycle)，还是每个 Epoch 更新 (如 StepLR)。
-    
+    # 1. 动态获取优化器中每个组已经设定好的 lr (包含 backbone 的 0.1 倍逻辑)
+    # 这样 backbone 组的 max_lr 就是 0.5e-5，其他组是 5e-5
+    found_lrs = [group['lr'] for group in optimizer.param_groups]
     if args.scheduler == 'OneCycle':
         # [原有逻辑] OneCycleLR: 需要在每个 Batch 结束后更新 (step)
         scheduler = lr_scheduler.OneCycleLR(
             optimizer, 
-            max_lr=args.lr, 
+            max_lr=found_lrs, # <--- 修正：传入列表，尊重差异
             steps_per_epoch=len(train_loader), 
             epochs=args.epochs, 
             pct_start=0.2

@@ -18,7 +18,7 @@ BATCH_SIZE=128              # 测试时显存占用小，可以适当调大
 
 # 4. 权重文件路径 (必须指定)
 # [请修改] 指向你训练好的 checkpoint.pth.tar 文件
-RESUME="/data/dsj/lys/SqR-main/experiment/nih_1024_AdamW_5e-5_2_2_1_16_32/model_best.pth.tar"
+RESUME="/data/dsj/lys/SqR-main/experiment/nih_1024_4096_AdamW_5e-5_4_2_1_16_64/model_best.pth.tar"
 
 # ================= 运行命令 =================
 echo "----------------------------------------------------------------"
