@@ -59,7 +59,7 @@ def parser_args():
     parser.add_argument('--optim', default='SGD', type=str, choices=['AdamW', 'Adam_twd', 'SGD'],
                         help='which optim to use')
     # --- [新增] 学习率调度器参数 ---
-    parser.add_argument('--scheduler', default='StepLR', type=str, choices=['OneCycle', 'StepLR'],
+    parser.add_argument('--scheduler', default='OneCycle', type=str, choices=['OneCycle', 'StepLR'],
                         help='Which scheduler to use: OneCycle (default) or StepLR')
     parser.add_argument('--step_size', default=40, type=int,
                         help='Period of learning rate decay (epochs) for StepLR')
@@ -288,7 +288,7 @@ def main_worker(args, logger):
         optimizer = torch.optim.AdamW(
             param_dicts,
             lr=base_lr, # 这里的 lr 仅作为 fallback，实际生效的是 param_dicts 里的
-            betas=(0.9, 0.999), eps=1e-08, weight_decay=args.weight_decay
+            betas=(0.9, 0.9999), eps=1e-08, weight_decay=args.weight_decay
         )
     elif args.optim == 'SGD': # [新增] SGD 逻辑
         optimizer = torch.optim.SGD(

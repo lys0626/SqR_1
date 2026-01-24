@@ -22,3 +22,4 @@ tmp
 *.sub
 __pycache__
 experiment
+test
