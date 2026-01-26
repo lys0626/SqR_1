@@ -3,7 +3,7 @@
 # ================= 配置区域 =================
 # 1. 指定使用的显卡 (例如使用第0号卡)
 export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=0
 export MASTER_ADDR='localhost'
 export MASTER_PORT='29500'
 # 2. 数据集设置
@@ -18,7 +18,7 @@ BATCH_SIZE=128              # 测试时显存占用小，可以适当调大
 
 # 4. 权重文件路径 (必须指定)
 # [请修改] 指向你训练好的 checkpoint.pth.tar 文件
-RESUME="/data/dsj/lys/SqR-main/experiment/nih_1024_4096_AdamW_5e-5_4_2_1_16_64/model_best.pth.tar"
+RESUME="/data/dsj/lys/SqR-main/experiment/nih_1024_8192_AdamW_5e-5_4_2_1_16_128_StepLR_1e-4/model_best.pth.tar"
 
 # ================= 运行命令 =================
 echo "----------------------------------------------------------------"
@@ -38,8 +38,11 @@ python main_mlc.py \
     --output ./test/test_result_nih \
     --workers 8 \
     --keep_input_proj \
-    --hidden_dim=1024 \
-    --dim_feedforward 4096
+    --hidden_dim 1024 \
+    --dim_feedforward 8192 \
+    --nheads 16 \
+    --dec_layers 4 \
+    --enc_layers 1 
 # 注释说明:
 # -e : 开启评估模式 (evaluate)
 # --resume : 加载权重

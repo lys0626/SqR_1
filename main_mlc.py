@@ -185,7 +185,8 @@ def parser_args():
     parser.add_argument('--splicemix_mode', default='SpliceMix', type=str,
                         choices=['SpliceMix', 'SpliceMix-CL'],
                         help='Mode of SpliceMix: Standard SpliceMix or SpliceMix-CL settings')
-
+    parser.add_argument('--splicemix_start_epoch', default=20, type=int,
+                        help='Epoch to switch from Q2L warmup to SpliceMix-only training.')
     args = parser.parse_args()
     return args
 
@@ -280,7 +281,7 @@ def main_worker(args, logger):
         },
         {
             "params": other_params, 
-            "lr": base_lr/2      # 其他部分 (Transformer, FC, Heads) 使用基础学习率
+            "lr": base_lr/3     # 其他部分 (Transformer, FC, Heads) 使用基础学习率
         },
     ]
     #初始化优化器
@@ -288,7 +289,7 @@ def main_worker(args, logger):
         optimizer = torch.optim.AdamW(
             param_dicts,
             lr=base_lr, # 这里的 lr 仅作为 fallback，实际生效的是 param_dicts 里的
-            betas=(0.9, 0.9999), eps=1e-08, weight_decay=args.weight_decay
+            betas=(0.9, 0.999), eps=1e-8, weight_decay=args.weight_decay
         )
     elif args.optim == 'SGD': # [新增] SGD 逻辑
         optimizer = torch.optim.SGD(
@@ -430,11 +431,47 @@ def main_worker(args, logger):
     best_epoch = -1
     end = time.time()
     best_epoch = -1
-    
+    # [新增] 在循环外初始化变量，防止作用域报错
+    clean_mask_dict = {}
+    soft_label_dict = {}
     # ================= [替换] 整个训练循环 =================
     for epoch in range(args.start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         torch.cuda.empty_cache()
+        model.train()
+        for param in model.parameters():
+            param.requires_grad = True
+        # --- [新增] Stage 2: 冻结 Q2L 相关参数 ---
+        # 只有在刚好到达启动 epoch 时执行一次冻结操作即可，或者每个 epoch 检查也可以
+        if args.enable_splicemix and epoch >= args.splicemix_start_epoch:
+            if args.rank == 0:
+                logger.info(f"[Stage 2] Freezing Q2L branch parameters (Transformer, Embed, FC)...")
+            
+            # 遍历模型参数，冻结属于 Q2L 分支的部分
+            # 注意：在 DDP 下，模型包裹在 .module 中
+            model_ref = model.module if hasattr(model, 'module') else model
+            
+            # 冻结列表
+            modules_to_freeze = [
+                model_ref.transformer, 
+                model_ref.query_embed, 
+                model_ref.input_proj, 
+                model_ref.fc
+            ]
+            
+            for module in modules_to_freeze:
+                if isinstance(module, torch.nn.Parameter):
+                    module.requires_grad = False
+                else:
+                    for param in module.parameters():
+                        param.requires_grad = False
+            
+            # 确保 Backbone 和 SpliceMix FC 是开启的
+            # (如果你的意图是连 Backbone 也冻结，只练 SpliceMix FC，请把 backbone 也加入上面的列表)
+            for param in model_ref.fc_splicemix.parameters():
+                param.requires_grad = True
+            # Backbone 保持默认（通常是 True），除非你想做 Linear Probing
+
 
         # --- 1. RoLT 数据清洗与统计 ---
         clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
@@ -447,11 +484,6 @@ def main_worker(args, logger):
             n_noisy_count = sum(1 for v in clean_mask_dict.values() if v is False)
             n_clean = n_total - n_noisy_count
 
-        # 确保模型可训练
-        model.train()
-        for param in model.parameters():
-            param.requires_grad = True
-        
         # --- 2. 训练阶段 ---
         train_start = time.time()
         
@@ -605,13 +637,20 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
     
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
     losses = AverageMeter('Loss', ':5.3f')
+    
+    # 确保模型处于训练模式
     model.train()
+    
     end = time.time()
-    # 定义一致性损失函数 (BCE)
-    # 混合图片的预测值 (logits) vs 重构的预测值 (sigmoid概率)
-    # 参考 SpliceMix_CL.py: loss_cl = bce(preds_m, preds_m_r.sigmoid())
+    
+    # 定义一致性损失函数 (BCE) - 用于 Stage 2 的 SpliceMix-CL
     consistency_criterion = torch.nn.BCEWithLogitsLoss()
-    # 这里的 train_loader 必须返回 indices
+
+    # 定义阶段标志
+    # Stage 1: epoch < start_epoch (Q2L Warmup)
+    # Stage 2: epoch >= start_epoch (SpliceMix Only)
+    is_stage2 = args.enable_splicemix and (epoch >= args.splicemix_start_epoch)
+
     for i, (images, target, indices) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
@@ -620,8 +659,9 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         indices = indices.cuda(non_blocking=True)
 
         # --- A. 区分样本 ---
+        # 根据 RoLT 返回的字典判断哪些样本是 Clean 的
         if len(clean_mask_dict) == 0:
-            # 默认全 Clean
+            # 默认全 Clean (初始状态或字典为空时)
             batch_clean_mask = torch.ones(images.size(0), dtype=torch.bool).cuda()
         else:
             batch_clean_mask = torch.tensor([clean_mask_dict.get(idx.item(), True) for idx in indices]).bool().cuda()
@@ -630,128 +670,122 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         clean_idxs = torch.where(batch_clean_mask)[0]
         noisy_idxs = torch.where(batch_noisy_mask)[0]
 
-        # ------------------------------------------------------------------
-        # B. 分支 1: SpliceMix 增强分支 (仅处理 Clean 样本，训练 GAP Head)
-        # ------------------------------------------------------------------
-        loss_splicemix_branch = torch.tensor(0.0).cuda()
-        #必须有4张干净图才能组成一个2x2的网格   
-        if args.enable_splicemix and len(clean_idxs) > 4:
-            images_clean = images[clean_idxs]
-            targets_clean = target[clean_idxs]
-            
-            # 1. 执行混合
-            # mixed_images_all 包含 [原始图片, 混合图片]
-            # flag 包含 mix_ind
-            mixed_images_all, mixed_targets_all, flag = splicemix_augmentor(images_clean, targets_clean)
-            
+        final_loss = torch.tensor(0.0).cuda()
+
+        # ==========================================================
+        #  Stage 2: 仅训练 SpliceMix 分支 (Backbone + GAP Head)
+        # ==========================================================
+        if is_stage2:
+            # 只有当有足够干净样本时才训练 (需要至少4张图来组成2x2网格)
+            if len(clean_idxs) > 4:
+                images_clean = images[clean_idxs]
+                targets_clean = target[clean_idxs]
+                
+                # 1. SpliceMix 混合
+                # 返回: 混合后的图片batch(包含原图和混合图), 混合后的标签, 混合信息flag
+                mixed_images_all, mixed_targets_all, flag = splicemix_augmentor(images_clean, targets_clean)
+                
+                with torch.cuda.amp.autocast(enabled=args.amp):
+                    # 2. 前向传播
+                    # 返回值: (Transformer_Logits, Transformer_Features, GAP_Logits)
+                    # [关键] 在 Stage 2 我们只训练 GAP Head，所以只取第3个返回值 out_gap_mixed
+                    _, _, out_gap_mixed = model(mixed_images_all)
+                    
+                    # 3. 计算基础 BCE Loss
+                    loss_splicemix = criterion(out_gap_mixed, mixed_targets_all)
+                    
+                    # 4. [可选] SpliceMix-CL 一致性损失
+                    if args.splicemix_mode == 'SpliceMix-CL':
+                        mix_ind = flag['mix_ind'] # 0: 原始图片, 1: 混合图片
+                        
+                        logits_original = out_gap_mixed[mix_ind == 0] # 原始图预测
+                        logits_mixed = out_gap_mixed[mix_ind == 1]    # 混合图预测
+                        
+                        # 利用原始图预测构建一致性目标
+                        target_cons = compute_consistency_target(logits_original, flag, images.device)
+                        
+                        # 计算一致性 Loss (混合图预测 vs 重构后的目标概率)
+                        loss_cl = consistency_criterion(logits_mixed, torch.sigmoid(target_cons).detach())
+                        loss_splicemix += loss_cl
+                    
+                    final_loss = loss_splicemix
+
+            # 如果本 batch 干净样本不足，final_loss 保持 0，不进行梯度更新
+            else:
+                final_loss = torch.tensor(0.0).cuda()
+
+        # ==========================================================
+        #  Stage 1: Q2L 原生训练 (Q2L Warmup)
+        # ==========================================================
+        else:
+            loss_q2l_branch = 0.0
             with torch.cuda.amp.autocast(enabled=args.amp):
-                # 2. 前向传播 (双分类器模式)
-                # 返回值: (Transformer_Logits, Transformer_Features, GAP_Logits)
-                # [关键] 我们只关心第3个: GAP Head 的输出
-                _, _, out_gap_mixed = model(mixed_images_all)
+                # 前向传播所有原始图片
+                # [关键] Stage 1 训练 Q2L Transformer，取第1个返回值 out_trans_all
+                out_trans_all, _, _ = model(images)
                 
-                # 3. 计算基础 BCE Loss
-                # 策略: 对原始图片和混合图片都进行监督 ("既看又练")
-                # 此时更新的是 Backbone + FC_SpliceMix
-                loss_splicemix_basic = criterion(out_gap_mixed, mixed_targets_all)
-                loss_splicemix_branch = loss_splicemix_basic
-
-                # 4. [CL逻辑] SpliceMix-CL 一致性损失
-                if args.splicemix_mode == 'SpliceMix-CL':
-                    # 解析 mix_ind
-                    mix_ind = flag['mix_ind'] # 0: 原始图片, 1: 混合图片
-                    
-                    # 分离 Logits (全部来自 GAP Head)
-                    logits_original_gap = out_gap_mixed[mix_ind == 0] # 原始图在 GAP Head 的预测
-                    logits_mixed_gap = out_gap_mixed[mix_ind == 1]    # 混合图在 GAP Head 的预测
-                    
-                    # 构造目标 (利用原始图的 GAP 预测值来指导混合图)
-                    target_consistency_logits = compute_consistency_target(logits_original_gap, flag, images.device)
-                    
-                    # 计算一致性损失
-                    loss_consistency = consistency_criterion(logits_mixed_gap, torch.sigmoid(target_consistency_logits).detach())
-                    
-                    # 累加 Loss
-                    loss_splicemix_branch += loss_consistency
-
-        # ------------------------------------------------------------------
-        # C. 分支 2: Q2L 原生分支 (处理所有样本，训练 Transformer Head)
-        # ------------------------------------------------------------------
-        loss_q2l_branch = 0.0
-        with torch.cuda.amp.autocast(enabled=args.amp):
-            # 前向传播所有原始图片
-            # [关键] 我们只关心第1个: Transformer Head 的输出
-            # 第2个 features_clean 虽然返回了，但此处 Loss 计算不需要，仅用于 RoLT 外部调用
-            # 第3个 out_gap_clean 也不需要，因为 GAP Head 已经在上面专门训练过了
-            out_trans_all, features_clean, _ = model(images)
-            valid_parts = 0
-            # C.1 干净样本 -> 原始硬标签 Loss
-            if len(clean_idxs) > 0:
-                loss_clean = criterion(out_trans_all[clean_idxs], target[clean_idxs])
-                loss_q2l_branch += loss_clean
-                valid_parts += 1
-            # C.2 噪声样本 -> 软伪标签 Loss (RoLT 生成)
-            if len(noisy_idxs) > 0:
-                soft_targets_list = []
-                # [优化前]
-                # for idx in indices[noisy_idxs]:
-                #     s_label = soft_label_dict.get(idx.item(), target[torch.where(indices==idx)[0][0]])
-                #     soft_targets_list.append(s_label)
+                valid_parts = 0
                 
-                # [优化后] 直接遍历 noisy_idxs (它是 batch 内的下标，如 0, 3, 5...)
-                for k in noisy_idxs:
-                    global_idx = indices[k].item() # 获取该样本在整个数据集中的全局ID
-                    # 尝试从字典取软标签，取不到则用原始 target[k]
-                    s_label = soft_label_dict.get(global_idx, target[k])
-                    soft_targets_list.append(s_label)
-                soft_targets = torch.stack(soft_targets_list).to(images.device)
-                loss_noisy = criterion(out_trans_all[noisy_idxs], soft_targets)
-                loss_q2l_branch += loss_noisy
-                valid_parts += 1
+                # C.1 干净样本 -> 使用原始硬标签 (Hard Label)
+                if len(clean_idxs) > 0:
+                    loss_clean = criterion(out_trans_all[clean_idxs], target[clean_idxs])
+                    loss_q2l_branch += loss_clean
+                    valid_parts += 1
+                
+                # C.2 噪声样本 -> 使用 RoLT 生成的软标签 (Soft Label)
+                if len(noisy_idxs) > 0:
+                    soft_targets_list = []
+                    for k in noisy_idxs:
+                        global_idx = indices[k].item()
+                        # 尝试取软标签，取不到则兜底使用原始标签
+                        s_label = soft_label_dict.get(global_idx, target[k])
+                        soft_targets_list.append(s_label)
+                    
+                    if len(soft_targets_list) > 0:
+                        soft_targets = torch.stack(soft_targets_list).to(images.device)
+                        loss_noisy = criterion(out_trans_all[noisy_idxs], soft_targets)
+                        loss_q2l_branch += loss_noisy
+                        valid_parts += 1
+                
+                if valid_parts > 0:
+                    loss_q2l_branch /= valid_parts
             
-            # 平均 Q2L 分支内的 Loss
-            if valid_parts > 0:
-                loss_q2l_branch /= valid_parts
+            final_loss = loss_q2l_branch
 
-        # --- D. 总 Loss ---
-        final_loss = 0.0
-        branch_count = 0
-        if args.enable_splicemix and len(clean_idxs) > 4:
-            final_loss += loss_splicemix_branch
-            branch_count += 1
-        if valid_parts > 0:
-            final_loss += loss_q2l_branch
-            branch_count += 1
-        
-        if branch_count > 0:
-            final_loss /= branch_count
+        # --- Backprop (反向传播) ---
+        # 只有当 Loss > 0 时才反向传播
+        if isinstance(final_loss, torch.Tensor) and final_loss.item() > 0:
+            optimizer.zero_grad()
+            scaler.scale(final_loss).backward()
+            
+            # [重要] 梯度裁剪
+            # 必须先 unscale 才能 clip
+            scaler.unscale_(optimizer)
+            # [修改] 差异化梯度裁剪
+            if not is_stage2:
+                # Stage 1 (Transformer): 必须裁剪，防爆炸
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+            else:
+                # Stage 2 (CNN): 移除裁剪，让梯度自由流动
+                # 如果发现 Loss 震荡严重，可以改为宽松的裁剪，如 max_norm=5.0
+                pass
+            
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # 如果使用 OneCycleLR (batch级调度)，则在此 step
+            if getattr(args, 'step_per_batch', False):
+                scheduler.step()
 
-        # Backprop
-        optimizer.zero_grad()
-        scaler.scale(final_loss).backward()
-        # --- [新增] 梯度裁剪 (关键修复) ---
-        # 在 step 之前，必须先 unscale 梯度
-        # scaler.unscale_(optimizer)
-        # 对 Transformer 结构，max_norm 通常设为 0.1 或 1.0
-        #如果Loss下降的很慢，可以将max_norm稍微调大例如1或5，接近NaN问题0.1是最安全的选项
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-        # -------------------------------
-        scaler.step(optimizer)
-        scaler.update()
-        # --- [修改] 仅当使用 OneCycleLR 等需要 per-batch 更新的调度器时才执行 ---
-        if args.step_per_batch:
-            scheduler.step()
-        # -------------------------------------------------------------------
-
+        # EMA 更新
         if epoch >= args.ema_epoch:
             ema_m.update(model)
 
-        losses.update(final_loss.item(), images.size(0))
+        losses.update(final_loss.item() if isinstance(final_loss, torch.Tensor) else final_loss, images.size(0))
         batch_time.update(time.time() - end)
         end = time.time()
 
     return losses.avg
-
 @torch.no_grad()
 def validate(val_loader, model, criterion, args, logger):
     #AveragePrecisionMeter自定义类，用于累积预测结果并计算mAP/mAUC等指标，False代表不考虑数据集中标记为困难的样本，在mimic和nih数据集中无效

@@ -221,7 +221,18 @@ class RoLT_Handler:
         # is_sample_clean = clean_counts > noisy_counts
         # is_sample_clean = (clean_counts - noisy_counts) >1
         # is_sample_clean = (clean_counts - noisy_counts) >2
+        '''
         # 统计结果
+        # 2. [新增] 附加判断条件
+        # 统计每个样本的总正标签数
+        total_pos_tags = clean_counts + noisy_counts
+            # 识别出：只有一个标签 且 该标签是噪声 的样本
+            # (此时 clean_counts 为 0, noisy_counts 为 1)
+            is_single_noisy = (total_pos_tags == 1) & (noisy_counts == 1)
+            # 将这些样本强制设为 False (Noisy)
+            # 使用位运算: 原结果 AND (NOT is_single_noisy)
+            is_sample_clean = is_sample_clean & (~is_single_noisy)
+        '''
         num_clean = is_sample_clean.sum().item()
         print(f"[RoLT] Trustworthy (Clean) Samples found: {num_clean} / {len(targets)}")
         
