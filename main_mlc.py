@@ -187,6 +187,11 @@ def parser_args():
                         help='Mode of SpliceMix: Standard SpliceMix or SpliceMix-CL settings')
     parser.add_argument('--splicemix_start_epoch', default=20, type=int,
                         help='Epoch to switch from Q2L warmup to SpliceMix-only training.')
+    # [新增] Stage 2 专用学习率参数
+    parser.add_argument('--lr_stage2', default=1e-4, type=float,
+                        help='Learning rate for Stage 2 (SpliceMix training)')
+    parser.add_argument('--optim_stage2', default='AdamW', type=str, choices=['AdamW', 'Adam_twd', 'SGD'],
+                        help='Optimizer choice for Stage 2 (default: SGD)')
     args = parser.parse_args()
     return args
 
@@ -478,6 +483,39 @@ def main_worker(args, logger):
             for param in model_ref.fc_splicemix.parameters():
                 param.requires_grad = True
             # Backbone 保持默认（通常是 True），除非你想做 Linear Probing
+        # --- B2. [新增] 自动切换优化器 (Auto Switch Optimizer) ---
+            # 仅在刚刚进入 Stage 2 的那一轮 (第20轮) 执行一次
+            if epoch == args.splicemix_start_epoch:
+                if args.rank == 0:
+                    logger.info(f" >>> [Stage 2 Transition] Switching Optimizer to LR: {args.lr_stage2} <<<")
+                # 1. 收集此时还需要梯度的参数 (Backbone + SpliceMix FC)
+                #    此时 Q2L 已经被上面的 B1 步骤冻结了，不会被选中
+                stage2_params = [p for p in model.parameters() if p.requires_grad]
+                # 2. 重新创建优化器 (使用新的 lr_stage2)
+                #    这会自动重置动量，适合新阶段开始
+                # [修改] 这里使用 args.optim_stage2 来判断
+                if args.optim_stage2 == 'AdamW':
+                    optimizer = torch.optim.AdamW(stage2_params, lr=args.lr_stage2, weight_decay=args.weight_decay)
+                elif args.optim_stage2 == 'SGD':
+                    # SGD 通常搭配 Momentum
+                    optimizer = torch.optim.SGD(stage2_params, lr=args.lr_stage2, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
+                elif args.optim_stage2 == 'Adam_twd':
+                     # 如果需要支持其他类型，按需添加
+                     optimizer = torch.optim.Adam(stage2_params, lr=args.lr_stage2, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+                # 3. 重新创建调度器 (Scheduler)
+                remaining_epochs = args.epochs - epoch
+                if args.scheduler == 'OneCycle':
+                    scheduler = lr_scheduler.OneCycleLR(
+                        optimizer, max_lr=args.lr_stage2, 
+                        steps_per_epoch=len(train_loader), 
+                        epochs=remaining_epochs, 
+                        pct_start=0.2
+                    )
+                elif args.scheduler == 'StepLR':
+                    # StepLR 重新开始计数
+                    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)               
+                if args.rank == 0:
+                    logger.info(f" >>> [Stage 2 Transition] Optimizer reset complete. Active params: {len(stage2_params)}")
         n_total = len(train_dataset)
         if len(clean_mask_dict) == 0:
             n_clean = n_total
@@ -773,8 +811,7 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             # [修改] 差异化梯度裁剪
             if not is_stage2:
                 # Stage 1 (Transformer): 必须裁剪，防爆炸
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-                pass
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             else:
                 # Stage 2 (CNN): 移除裁剪，让梯度自由流动
                 # 如果发现 Loss 震荡严重，可以改为宽松的裁剪，如 max_norm=5.0
