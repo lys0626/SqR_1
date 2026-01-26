@@ -474,7 +474,21 @@ def main_worker(args, logger):
 
 
         # --- 1. RoLT 数据清洗与统计 ---
-        clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
+        # ================= [修改开始] =================
+    # [核心修复] 逻辑：如果是 Stage 1，或者（是 Stage 2 但字典为空，说明是刚 Resume），必须运行 step
+        need_run_rolt = (epoch <= args.splicemix_start_epoch) or (not clean_mask_dict)
+
+        if need_run_rolt:
+            clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
+            
+            # [Stage 2 冻结提示]
+            if args.rank == 0 and epoch >= args.splicemix_start_epoch:
+                logger.info(f"[Stage 2] RoLT mask generated (re-generated due to resume/transition) and FROZEN.")
+        else:
+            # Stage 2 后续 Epoch：跳过计算，直接复用内存变量
+            if args.rank == 0:
+                logger.info(f"[Stage 2] Using frozen RoLT masks from epoch {args.splicemix_start_epoch}...")
+    # ================= [修改结束] =================
         
         n_total = len(train_dataset)
         if len(clean_mask_dict) == 0:
@@ -529,13 +543,22 @@ def main_worker(args, logger):
             mi_p, ma_p = metrics_res['micro_P'], metrics_res['macro_P']
             mi_r, ma_r = metrics_res['micro_R'], metrics_res['macro_R']
 
-            losses.update(loss)
+            losses.update(val_loss)
             mAUCs.update(mAUC)
 
-            is_best = mAUC > best_mAUC
-            if is_best:
-                best_epoch = epoch
-            best_mAUC = max(mAUC, best_mAUC)
+            # ================= [这是你要修改/替换的核心部分] =================
+            # 逻辑：Stage 1 仅做预热，不评选 Best；Stage 2 才开始评选 Best
+            if epoch < args.splicemix_start_epoch:
+                # Stage 1: 强制 is_best 为 False
+                # 这样就不会生成 model_best.pth.tar，只保存 checkpoint.pth.tar
+                is_best = False
+            else:
+                # Stage 2: 正常的最佳模型评选逻辑
+                is_best = mAUC > best_mAUC
+                if is_best:
+                    best_epoch = epoch
+                    best_mAUC = mAUC # 只有在 Stage 2 才更新全局最佳指标
+            # ================= [修改结束] =================
 
             # [日志格式 2] Test Log
             timestamp = datetime.datetime.now().strftime('%m-%d %H:%M:%S')
@@ -548,9 +571,12 @@ def main_worker(args, logger):
                     f"miP: {mi_p:.4f}, maP: {ma_p:.4f} ."
                 )
 
-            # [日志格式 3] Best Result Log
+            # [日志格式 3] Best Result Log (这里也要配合修改一下，让日志更清晰)
             if args.rank == 0:
-                logger.info(f"{log_prefix}: --[Test-best] (E{best_epoch}), mAUC: {best_mAUC:.4f}")
+                if epoch < args.splicemix_start_epoch:
+                     logger.info(f"{log_prefix}: --[Stage 1 Warmup] (No Best Selection)")
+                else:
+                     logger.info(f"{log_prefix}: --[Test-best] (E{best_epoch}), mAUC: {best_mAUC:.4f}")
 
             if summary_writer:
                 summary_writer.add_scalar('val_mAUC', mAUC, epoch)
@@ -591,10 +617,6 @@ def main_worker(args, logger):
                     'optimizer' : optimizer.state_dict(),
                 }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint.pth.tar'))
 
-            # Early Stop
-            if args.early_stop:
-                if best_epoch >= 0 and epoch - best_epoch > 8:
-                    break
 
 def compute_consistency_target(preds_original, flag, device):
     """
@@ -852,8 +874,12 @@ class ModelEma(torch.nn.Module):
         self._update(model, update_fn=lambda e, m: m)
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+    # [修复] 无论是否是 Best，都要保存当前 checkpoint (覆盖写)，用于断点续训
+    torch.save(state, filename)
+    # 如果是 Best，额外备份一份
     if is_best:
-        torch.save(state, os.path.split(filename)[0] + '/model_best.pth.tar')
+        best_path = os.path.join(os.path.split(filename)[0], 'model_best.pth.tar')
+        torch.save(state, best_path)
 
 class AverageMeter(object):
     def __init__(self, name, fmt=':f', val_only=False):

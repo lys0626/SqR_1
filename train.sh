@@ -2,9 +2,9 @@
 # --- [新增] 强制使用 Conda 环境的动态库 ---
 export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
 # --- [新增] 设置分布式训练的主节点信息 (单机训练必须配置) ---
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=0
 export MASTER_ADDR='localhost'
-export MASTER_PORT='12349'
+export MASTER_PORT='12345'
 # --- 配置区域 ---
 # 数据集名称: mimic 或 nih
 DATANAME="nih"
