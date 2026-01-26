@@ -281,7 +281,7 @@ def main_worker(args, logger):
         },
         {
             "params": other_params, 
-            "lr": base_lr/3     # 其他部分 (Transformer, FC, Heads) 使用基础学习率
+            "lr": base_lr     # 其他部分 (Transformer, FC, Heads) 使用基础学习率
         },
     ]
     #初始化优化器
@@ -438,6 +438,17 @@ def main_worker(args, logger):
     for epoch in range(args.start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         torch.cuda.empty_cache()
+        # [核心修复] 逻辑：如果是 Stage 1，或者（是 Stage 2 但字典为空，说明是刚 Resume），必须运行 step
+        need_run_rolt = (epoch <= args.splicemix_start_epoch) or (not clean_mask_dict)
+        if need_run_rolt:
+            clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
+            # [Stage 2 冻结提示]
+            if args.rank == 0 and epoch >= args.splicemix_start_epoch:
+                logger.info(f"[Stage 2] RoLT mask generated (re-generated due to resume/transition) and FROZEN.")
+        else:
+            # Stage 2 后续 Epoch：跳过计算，直接复用内存变量
+            if args.rank == 0:
+                logger.info(f"[Stage 2] Using frozen RoLT masks from epoch {args.splicemix_start_epoch}...")
         model.train()
         for param in model.parameters():
             param.requires_grad = True
@@ -446,11 +457,9 @@ def main_worker(args, logger):
         if args.enable_splicemix and epoch >= args.splicemix_start_epoch:
             if args.rank == 0:
                 logger.info(f"[Stage 2] Freezing Q2L branch parameters (Transformer, Embed, FC)...")
-            
             # 遍历模型参数，冻结属于 Q2L 分支的部分
             # 注意：在 DDP 下，模型包裹在 .module 中
             model_ref = model.module if hasattr(model, 'module') else model
-            
             # 冻结列表
             modules_to_freeze = [
                 model_ref.transformer, 
@@ -458,38 +467,17 @@ def main_worker(args, logger):
                 model_ref.input_proj, 
                 model_ref.fc
             ]
-            
             for module in modules_to_freeze:
                 if isinstance(module, torch.nn.Parameter):
                     module.requires_grad = False
                 else:
                     for param in module.parameters():
                         param.requires_grad = False
-            
             # 确保 Backbone 和 SpliceMix FC 是开启的
             # (如果你的意图是连 Backbone 也冻结，只练 SpliceMix FC，请把 backbone 也加入上面的列表)
             for param in model_ref.fc_splicemix.parameters():
                 param.requires_grad = True
             # Backbone 保持默认（通常是 True），除非你想做 Linear Probing
-
-
-        # --- 1. RoLT 数据清洗与统计 ---
-        # ================= [修改开始] =================
-    # [核心修复] 逻辑：如果是 Stage 1，或者（是 Stage 2 但字典为空，说明是刚 Resume），必须运行 step
-        need_run_rolt = (epoch <= args.splicemix_start_epoch) or (not clean_mask_dict)
-
-        if need_run_rolt:
-            clean_mask_dict, soft_label_dict = rolt_handler.step(epoch)
-            
-            # [Stage 2 冻结提示]
-            if args.rank == 0 and epoch >= args.splicemix_start_epoch:
-                logger.info(f"[Stage 2] RoLT mask generated (re-generated due to resume/transition) and FROZEN.")
-        else:
-            # Stage 2 后续 Epoch：跳过计算，直接复用内存变量
-            if args.rank == 0:
-                logger.info(f"[Stage 2] Using frozen RoLT masks from epoch {args.splicemix_start_epoch}...")
-    # ================= [修改结束] =================
-        
         n_total = len(train_dataset)
         if len(clean_mask_dict) == 0:
             n_clean = n_total
@@ -497,7 +485,6 @@ def main_worker(args, logger):
             # 统计 False (Noisy) 的数量，剩下的就是 Clean
             n_noisy_count = sum(1 for v in clean_mask_dict.values() if v is False)
             n_clean = n_total - n_noisy_count
-
         # --- 2. 训练阶段 ---
         train_start = time.time()
         
@@ -786,7 +773,8 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             # [修改] 差异化梯度裁剪
             if not is_stage2:
                 # Stage 1 (Transformer): 必须裁剪，防爆炸
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                pass
             else:
                 # Stage 2 (CNN): 移除裁剪，让梯度自由流动
                 # 如果发现 Loss 震荡严重，可以改为宽松的裁剪，如 max_norm=5.0
