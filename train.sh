@@ -2,27 +2,27 @@
 # --- [新增] 强制使用 Conda 环境的动态库 ---
 export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
 # --- [新增] 设置分布式训练的主节点信息 (单机训练必须配置) ---
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=3
 export MASTER_ADDR='localhost'
-export MASTER_PORT='12351'
+export MASTER_PORT='12355'
 # --- 配置区域 ---
 # 数据集名称: mimic 或 nih
 DATANAME="nih"
 DATA_DIR="/data/nih-chest-xrays"
-HIDDEN_DIM=1024
-DIM_FEEDFORWARD=8192
+HIDDEN_DIM=512
+DIM_FEEDFORWARD=2048
 OPTIM="AdamW"   # 注意：main_mlc.py 中要求是 'AdamW' (区分大小写)，不要写成 'Adamw'
 OPTIM_STAGE2="SGD"
-LR="1e-5"
+LR="5e-5"
 LR_STAGE2="0.05"
-DEC_LAYERS=4
-NHEADS=16
+DEC_LAYERS=2
+NHEADS=4
 BATCH_SIZE=32
 SCHEDULER=StepLR
 WD=1e-4
-SPLICEMIX_START_EPOCH=20
+SPLICEMIX_START_EPOCH=10
 # 输出目录
-OUTPUT_DIR="./experiment/${DATANAME}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SPLICEMIX_START_EPOCH}_no"
+OUTPUT_DIR="./experiment/${DATANAME}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SPLICEMIX_START_EPOCH}_yes"
 # 类别数 (MIMIC-CXR通常是13或14，NIH是14，请根据实际情况修改)
 NUM_CLASS=14
 
@@ -52,7 +52,6 @@ python main_mlc.py \
   --pretrained \
   --momentum 0.9 \
   --wd ${WD} \
-  --amp \
   --enable_splicemix \
   --splicemix_prob 1 \
   --keep_input_proj \

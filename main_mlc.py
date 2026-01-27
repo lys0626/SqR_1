@@ -838,7 +838,8 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             # [修改] 差异化梯度裁剪
             if not is_stage2:
                 # Stage 1 (Transformer): 必须裁剪，防爆炸
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                pass
             else:
                 # Stage 2 (CNN): 移除裁剪，让梯度自由流动
                 # 如果发现 Loss 震荡严重，可以改为宽松的裁剪，如 max_norm=5.0
