@@ -192,6 +192,8 @@ def parser_args():
                         help='Learning rate for Stage 2 (SpliceMix training)')
     parser.add_argument('--optim_stage2', default='AdamW', type=str, choices=['AdamW', 'Adam_twd', 'SGD'],
                         help='Optimizer choice for Stage 2 (default: SGD)')
+    parser.add_argument('--stage2_backbone_init', default='continue', type=str, choices=['continue', 'reset'],
+                        help='Stage 2 Backbone Init: "continue" (keep Stage 1 weights) or "reset" (reload ImageNet weights)')
     args = parser.parse_args()
     return args
 
@@ -254,11 +256,21 @@ def main_worker(args, logger):
                                                          broadcast_buffers=False,
                                                          find_unused_parameters=True  # <--- 必须加，单卡也得加
                                                          )
-
-    # --- [修改] Criterion ---
+    # --- [新增 A] 备份初始 Backbone 权重 (ImageNet状态) ---
+    # 必须在训练循环开始前执行
+    _model_ref = model.module if hasattr(model, 'module') else model
+    imagenet_backbone_state = None
+    if args.stage2_backbone_init == 'reset':
+        if args.rank == 0:
+            logger.info("Backup: Saving initial (ImageNet) backbone weights for potential Stage 2 reset...")
+        # Deepcopy 到 CPU 以防占用显存
+        if hasattr(_model_ref, 'backbone'):
+            imagenet_backbone_state = {k: v.cpu().clone() for k, v in _model_ref.backbone.state_dict().items()}
+        else:
+            if args.rank == 0:
+                logger.warning("Warning: Model does not have 'backbone' attribute. Reset function might fail.")
     # 使用 BCEWithLogitsLoss 替代 ASL
     criterion = torch.nn.BCEWithLogitsLoss()
-
     # optimizer
     # --- [修改] Optimizer: 支持参数分组和 SGD ---
     args.lr_mult = args.batch_size / 256
@@ -352,7 +364,6 @@ def main_worker(args, logger):
     train_dataset, val_dataset = get_datasets(args)
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    
     # 注意：确保 Dataset 已经修改为返回 (image, target, index)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size // dist.get_world_size(), shuffle=(train_sampler is None),
@@ -482,38 +493,54 @@ def main_worker(args, logger):
             # (如果你的意图是连 Backbone 也冻结，只练 SpliceMix FC，请把 backbone 也加入上面的列表)
             for param in model_ref.fc_splicemix.parameters():
                 param.requires_grad = True
-            # Backbone 保持默认（通常是 True），除非你想做 Linear Probing
-        # --- B2. [新增] 自动切换优化器 (Auto Switch Optimizer) ---
-            # 仅在刚刚进入 Stage 2 的那一轮 (第20轮) 执行一次
+            # (B) [核心修改] 阶段切换逻辑：备份 -> 重置 -> 换优化器
+            #     (仅在切换的那一轮 epoch == 20 执行一次)
+            # =======================================================
             if epoch == args.splicemix_start_epoch:
+                # 1. [Snapshot] 先保存 Stage 1 最终权重 (防止被覆盖)
                 if args.rank == 0:
-                    logger.info(f" >>> [Stage 2 Transition] Switching Optimizer to LR: {args.lr_stage2} <<<")
-                # 1. 收集此时还需要梯度的参数 (Backbone + SpliceMix FC)
-                #    此时 Q2L 已经被上面的 B1 步骤冻结了，不会被选中
+                    logger.info(f"Snapshot: Saving Stage 1 final checkpoint before transition...")
+                    save_checkpoint({
+                        'epoch': epoch, 
+                        'arch': args.backbone,
+                        'state_dict': model.state_dict(),
+                        'best_mAUC': best_mAUC,
+                        'optimizer': optimizer.state_dict(), 
+                    }, is_best=False, filename=os.path.join(args.output, 'checkpoint_stage1_final.pth.tar'))
+                # 2. [Reset] 如果开启了重置，加载 ImageNet 初始权重
+                #    注意：这里我们使用 model_ref (他在上面几行已经被定义为 model.module 了)
+                if args.stage2_backbone_init == 'reset' and imagenet_backbone_state is not None:
+                    if args.rank == 0:
+                        logger.info(" >>> [Stage 2] Resetting Backbone to ImageNet-1k pretrained weights! <<<")
+                    device = next(model_ref.parameters()).device
+                    state_to_load = {k: v.to(device) for k, v in imagenet_backbone_state.items()}
+                    model_ref.backbone.load_state_dict(state_to_load)
+                    if args.rank == 0:
+                        logger.info(" >>> [Stage 2] Backbone weights reset successful.")
+                # 3. [Switch Optimizer] 切换优化器
+                if args.rank == 0:
+                    logger.info(f" >>> [Stage 2 Transition] Switching Optimizer to {args.optim_stage2} with LR: {args.lr_stage2} <<<")
+
+                # 收集参数 (此时 Transformer 已被上面的逻辑冻结，不会被包含进来)
                 stage2_params = [p for p in model.parameters() if p.requires_grad]
-                # 2. 重新创建优化器 (使用新的 lr_stage2)
-                #    这会自动重置动量，适合新阶段开始
-                # [修改] 这里使用 args.optim_stage2 来判断
+
+                # 创建新优化器
                 if args.optim_stage2 == 'AdamW':
                     optimizer = torch.optim.AdamW(stage2_params, lr=args.lr_stage2, weight_decay=args.weight_decay)
                 elif args.optim_stage2 == 'SGD':
-                    # SGD 通常搭配 Momentum
                     optimizer = torch.optim.SGD(stage2_params, lr=args.lr_stage2, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
                 elif args.optim_stage2 == 'Adam_twd':
-                     # 如果需要支持其他类型，按需添加
                      optimizer = torch.optim.Adam(stage2_params, lr=args.lr_stage2, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
-                # 3. 重新创建调度器 (Scheduler)
+                
+                # 重置 Scheduler
                 remaining_epochs = args.epochs - epoch
                 if args.scheduler == 'OneCycle':
-                    scheduler = lr_scheduler.OneCycleLR(
-                        optimizer, max_lr=args.lr_stage2, 
-                        steps_per_epoch=len(train_loader), 
-                        epochs=remaining_epochs, 
-                        pct_start=0.2
-                    )
+                    scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr_stage2, steps_per_epoch=len(train_loader), epochs=remaining_epochs, pct_start=0.2)
+                    args.step_per_batch = True
                 elif args.scheduler == 'StepLR':
-                    # StepLR 重新开始计数
-                    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)               
+                    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+                    args.step_per_batch = False
+                
                 if args.rank == 0:
                     logger.info(f" >>> [Stage 2 Transition] Optimizer reset complete. Active params: {len(stage2_params)}")
         n_total = len(train_dataset)
