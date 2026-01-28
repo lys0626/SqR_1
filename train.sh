@@ -2,9 +2,9 @@
 # --- [新增] 强制使用 Conda 环境的动态库 ---
 export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
 # --- [新增] 设置分布式训练的主节点信息 (单机训练必须配置) ---
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=5
 export MASTER_ADDR='localhost'
-export MASTER_PORT='12355'
+export MASTER_PORT='12351'
 # --- 配置区域 ---
 # 数据集名称: mimic 或 nih
 DATANAME="nih"
@@ -17,12 +17,13 @@ LR="5e-5"
 LR_STAGE2="0.05"
 DEC_LAYERS=2
 NHEADS=4
-BATCH_SIZE=32
-SCHEDULER=StepLR
+BATCH_SIZE=128
+SCHEDULER=OneCycle
+SCHEDULER_STAGE2=StepLR
 WD=1e-4
-SPLICEMIX_START_EPOCH=10
+SPLICEMIX_START_EPOCH=20
 # 输出目录
-OUTPUT_DIR="./experiment/${DATANAME}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SPLICEMIX_START_EPOCH}_yes"
+OUTPUT_DIR="./experiment/${DATANAME}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SCHEDULER_STAGE2}_${SPLICEMIX_START_EPOCH}_1_yes"
 # 类别数 (MIMIC-CXR通常是13或14，NIH是14，请根据实际情况修改)
 NUM_CLASS=14
 
@@ -61,5 +62,6 @@ python main_mlc.py \
   --enc_layers 1 \
   --nheads ${NHEADS} \
   --scheduler ${SCHEDULER} \
+  --scheduler_stage2 ${SCHEDULER_STAGE2} \
   --splicemix_start_epoch ${SPLICEMIX_START_EPOCH} \
 

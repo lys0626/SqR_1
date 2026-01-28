@@ -194,6 +194,10 @@ def parser_args():
                         help='Optimizer choice for Stage 2 (default: SGD)')
     parser.add_argument('--stage2_backbone_init', default='continue', type=str, choices=['continue', 'reset'],
                         help='Stage 2 Backbone Init: "continue" (keep Stage 1 weights) or "reset" (reload ImageNet weights)')
+    parser.add_argument('--scheduler_stage2', default=None, type=str, choices=['OneCycle', 'StepLR'],
+                        help='Scheduler choice for Stage 2. If None, keep using --scheduler')
+    parser.add_argument('--rolt_start_epoch', default=7, type=int,
+                        help='Epoch to start applying RoLT noise filtering. Before this, all data is treated as clean.')
     args = parser.parse_args()
     return args
 
@@ -533,14 +537,32 @@ def main_worker(args, logger):
                      optimizer = torch.optim.Adam(stage2_params, lr=args.lr_stage2, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
                 
                 # 重置 Scheduler
+                # remaining_epochs = args.epochs - epoch
+                # if args.scheduler == 'OneCycle':
+                #     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr_stage2, steps_per_epoch=len(train_loader), epochs=remaining_epochs, pct_start=0.2)
+                #     args.step_per_batch = True
+                # elif args.scheduler == 'StepLR':
+                #     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+                #     args.step_per_batch = False
+                # =======================================================
+                # 3. [修改] 重新创建调度器 (Scheduler) - 支持 Stage 2 独立配置
+                # =======================================================
+                # 逻辑：如果指定了 scheduler_stage2 就用新的，否则沿用旧的 scheduler 类型
+                stage2_sched_name = args.scheduler_stage2 if args.scheduler_stage2 else args.scheduler
+                
                 remaining_epochs = args.epochs - epoch
-                if args.scheduler == 'OneCycle':
-                    scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr_stage2, steps_per_epoch=len(train_loader), epochs=remaining_epochs, pct_start=0.2)
+
+                if stage2_sched_name == 'OneCycle':
+                    scheduler = lr_scheduler.OneCycleLR(
+                        optimizer, max_lr=args.lr_stage2, 
+                        steps_per_epoch=len(train_loader), 
+                        epochs=remaining_epochs, 
+                        pct_start=0.2
+                    )
                     args.step_per_batch = True
-                elif args.scheduler == 'StepLR':
+                elif stage2_sched_name == 'StepLR':
                     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
                     args.step_per_batch = False
-                
                 if args.rank == 0:
                     logger.info(f" >>> [Stage 2 Transition] Optimizer reset complete. Active params: {len(stage2_params)}")
         n_total = len(train_dataset)
@@ -797,32 +819,37 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
                 # 前向传播所有原始图片
                 # [关键] Stage 1 训练 Q2L Transformer，取第1个返回值 out_trans_all
                 out_trans_all, _, _ = model(images)
-                
-                valid_parts = 0
-                
-                # C.1 干净样本 -> 使用原始硬标签 (Hard Label)
-                if len(clean_idxs) > 0:
-                    loss_clean = criterion(out_trans_all[clean_idxs], target[clean_idxs])
-                    loss_q2l_branch += loss_clean
-                    valid_parts += 1
-                
-                # C.2 噪声样本 -> 使用 RoLT 生成的软标签 (Soft Label)
-                if len(noisy_idxs) > 0:
-                    soft_targets_list = []
-                    for k in noisy_idxs:
-                        global_idx = indices[k].item()
-                        # 尝试取软标签，取不到则兜底使用原始标签
-                        s_label = soft_label_dict.get(global_idx, target[k])
-                        soft_targets_list.append(s_label)
-                    
-                    if len(soft_targets_list) > 0:
-                        soft_targets = torch.stack(soft_targets_list).to(images.device)
-                        loss_noisy = criterion(out_trans_all[noisy_idxs], soft_targets)
-                        loss_q2l_branch += loss_noisy
+                # 2. [修改] 判断是否处于 RoLT 预热期
+                #    如果当前 epoch 小于设定的启动轮数，强制进行普通的监督训练
+                if epoch < args.rolt_start_epoch:
+                    # --- 预热模式 (Warmup Mode) ---
+                    # 忽略 RoLT 的 Mask，直接计算所有样本的 Loss
+                    # 这能让模型先学到基础特征，避免一开始被错误的 RoLT 筛选带偏
+                    loss_q2l_branch = criterion(out_trans_all, target)
+                else :
+                    valid_parts = 0
+                    # C.1 干净样本 -> 使用原始硬标签 (Hard Label)
+                    if len(clean_idxs) > 0:
+                        loss_clean = criterion(out_trans_all[clean_idxs], target[clean_idxs])
+                        loss_q2l_branch += loss_clean
                         valid_parts += 1
-                
-                if valid_parts > 0:
-                    loss_q2l_branch /= valid_parts
+                    # C.2 噪声样本 -> 使用 RoLT 生成的软标签 (Soft Label)
+                    if len(noisy_idxs) > 0:
+                        soft_targets_list = []
+                        for k in noisy_idxs:
+                            global_idx = indices[k].item()
+                            # 尝试取软标签，取不到则兜底使用原始标签
+                            s_label = soft_label_dict.get(global_idx, target[k])
+                            soft_targets_list.append(s_label)
+                        
+                        if len(soft_targets_list) > 0:
+                            soft_targets = torch.stack(soft_targets_list).to(images.device)
+                            loss_noisy = criterion(out_trans_all[noisy_idxs], soft_targets)
+                            loss_q2l_branch += loss_noisy
+                            valid_parts += 1
+                    
+                    if valid_parts > 0:
+                        loss_q2l_branch /= valid_parts
             
             final_loss = loss_q2l_branch
 
