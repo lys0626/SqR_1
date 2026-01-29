@@ -153,7 +153,7 @@ def parser_args():
                         help="Intermediate size of the feedforward layers in the transformer blocks")
     parser.add_argument('--hidden_dim', default=512, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
-    parser.add_argument('--dropout', default=0.1, type=float,
+    parser.add_argument('--dropout', default=0, type=float,
                         help="Dropout applied in the transformer")
     parser.add_argument('--nheads', default=4, type=int,
                         help="Number of attention heads inside the transformer's attentions")
@@ -192,11 +192,11 @@ def parser_args():
                         help='Learning rate for Stage 2 (SpliceMix training)')
     parser.add_argument('--optim_stage2', default='AdamW', type=str, choices=['AdamW', 'Adam_twd', 'SGD'],
                         help='Optimizer choice for Stage 2 (default: SGD)')
-    parser.add_argument('--stage2_backbone_init', default='continue', type=str, choices=['continue', 'reset'],
+    parser.add_argument('--stage2_backbone_init', default='reset', type=str, choices=['continue', 'reset'],
                         help='Stage 2 Backbone Init: "continue" (keep Stage 1 weights) or "reset" (reload ImageNet weights)')
     parser.add_argument('--scheduler_stage2', default=None, type=str, choices=['OneCycle', 'StepLR'],
                         help='Scheduler choice for Stage 2. If None, keep using --scheduler')
-    parser.add_argument('--rolt_start_epoch', default=7, type=int,
+    parser.add_argument('--rolt_start_epoch', default=10, type=int,
                         help='Epoch to start applying RoLT noise filtering. Before this, all data is treated as clean.')
     args = parser.parse_args()
     return args
@@ -603,11 +603,11 @@ def main_worker(args, logger):
         if epoch % args.val_interval == 0:
             val_start = time.time()
             
-            # validate 返回 (metrics_res, val_loss) -> 需要下一步修改 validate 函数
-            metrics_res, val_loss = validate(val_loader, model, criterion, args, logger)
+            # [修改4] 调用 validate 时，显式传入 epoch=epoch
+            metrics_res, val_loss = validate(val_loader, model, criterion, args, logger, epoch=epoch)
             
-            # EMA 模型验证 (可选)
-            metrics_res_ema, _ = validate(val_loader, ema_m.module, criterion, args, logger)
+            # EMA 模型验证 (同样传入 epoch)
+            metrics_res_ema, _ = validate(val_loader, ema_m.module, criterion, args, logger, epoch=epoch)
             
             val_duration = sec_to_str(time.time() - val_start)
 
@@ -772,36 +772,42 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         #  Stage 2: 仅训练 SpliceMix 分支 (Backbone + GAP Head)
         # ==========================================================
         if is_stage2:
-            # 只有当有足够干净样本时才训练 (需要至少4张图来组成2x2网格)
             if len(clean_idxs) > 4:
-                images_clean = images[clean_idxs]
-                targets_clean = target[clean_idxs]
-                
                 # 1. SpliceMix 混合
-                # 返回: 混合后的图片batch(包含原图和混合图), 混合后的标签, 混合信息flag
+                # 注意：mixed_images_all 应该只包含混合后的图，不包含原图
+                # 参考 SpliceMix.py，它返回的是 torch.cat([inputs, inputs_mix_g])
+                # 所以我们需要根据 mix_ind 分离出纯混合图
                 mixed_images_all, mixed_targets_all, flag = splicemix_augmentor(images_clean, targets_clean)
+                
+                mix_ind = flag['mix_ind'] # 0 是原图, 1 是混合图
                 
                 with torch.cuda.amp.autocast(enabled=args.amp):
                     # 2. 前向传播
-                    # 返回值: (Transformer_Logits, Transformer_Features, GAP_Logits)
-                    # [关键] 在 Stage 2 我们只训练 GAP Head，所以只取第3个返回值 out_gap_mixed
-                    _, _, out_gap_mixed = model(mixed_images_all)
+                    # [修改] 接收第4个返回值 src
+                    _, _, out_gap_all, src_all = model(mixed_images_all)
                     
-                    # 3. 计算基础 BCE Loss
-                    loss_splicemix = criterion(out_gap_mixed, mixed_targets_all)
+                    # 分离原图和混合图
+                    # out_gap_mixed 是全图 GAP 结果，用于计算基础分类 Loss
+                    logits_original = out_gap_all[mix_ind == 0]
+                    logits_mixed_global = out_gap_all[mix_ind == 1]
+                    targets_mixed_global = mixed_targets_all[mix_ind == 1]
                     
-                    # 4. [可选] SpliceMix-CL 一致性损失
+                    # 3. 基础分类 Loss (针对混合图的全局标签)
+                    loss_splicemix = criterion(logits_mixed_global, targets_mixed_global)
+                    
+                    # 4. [修改] SpliceMix-CL 一致性损失
                     if args.splicemix_mode == 'SpliceMix-CL':
-                        mix_ind = flag['mix_ind'] # 0: 原始图片, 1: 混合图片
+                        # 获取混合图的空间特征
+                        src_mixed = src_all[mix_ind == 1]
                         
-                        logits_original = out_gap_mixed[mix_ind == 0] # 原始图预测
-                        logits_mixed = out_gap_mixed[mix_ind == 1]    # 混合图预测
-                        
-                        # 利用原始图预测构建一致性目标
-                        target_cons = compute_consistency_target(logits_original, flag, images.device)
-                        
-                        # 计算一致性 Loss (混合图预测 vs 重构后的目标概率)
-                        loss_cl = consistency_criterion(logits_mixed, torch.sigmoid(target_cons).detach())
+                        # 调用我们新写的函数
+                        loss_cl = compute_cl_loss(
+                            model, 
+                            src_mixed, 
+                            logits_original, 
+                            flag, 
+                            consistency_criterion
+                        )
                         loss_splicemix += loss_cl
                     
                     final_loss = loss_splicemix
@@ -865,7 +871,7 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             # [修改] 差异化梯度裁剪
             if not is_stage2:
                 # Stage 1 (Transformer): 必须裁剪，防爆炸
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
                 pass
             else:
                 # Stage 2 (CNN): 移除裁剪，让梯度自由流动
@@ -889,21 +895,31 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
 
     return losses.avg
 @torch.no_grad()
-def validate(val_loader, model, criterion, args, logger):
-    #AveragePrecisionMeter自定义类，用于累积预测结果并计算mAP/mAUC等指标，False代表不考虑数据集中标记为困难的样本，在mimic和nih数据集中无效
+def validate(val_loader, model, criterion, args, logger, epoch=None):  # <--- [修改1] 增加 epoch 参数默认值
+    # AveragePrecisionMeter自定义类，用于累积预测结果并计算mAP/mAUC等指标
     meter = AveragePrecisionMeter(difficult_examples=False)
-    losses = AverageMeter('Loss', ':5.3f') # 用于记录验证集 Loss
+    losses = AverageMeter('Loss', ':5.3f') 
     
     model.eval()
     
     for i, (images, target, _) in enumerate(val_loader): 
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
-        #混合精度上下文
+        
+        # 混合精度上下文
         with torch.cuda.amp.autocast(enabled=args.amp):
-            #在这里是取Splicemix分支fc的预测结果，如果想去Q2L分支的预测结果应该采用output, _, _ = model(images)
-            _, _, output = model(images)
-            # [新增] 计算 Loss
+            # <--- [修改2] 获取模型的所有输出 (Transformer分支, 特征, SpliceMix分支)
+            out_logits, _, out_splicemix = model(images)
+            
+            # <--- [修改3] 核心逻辑：根据阶段选择正确的分支进行评估
+            # 如果提供了 epoch 且处于 Stage 1 (Warmup 阶段)
+            if epoch is not None and epoch < args.splicemix_start_epoch:
+                output = out_logits       # 评估 Transformer 分支 (Q2L)
+            else:
+                # 处于 Stage 2 (SpliceMix 阶段) 或未提供 epoch
+                output = out_splicemix    # 评估 GAP 分支 (SpliceMix)
+            
+            # 计算 Loss (此时 output 已经是正确分支的预测值了)
             loss = criterion(output, target)
             losses.update(loss.item(), images.size(0))
             
@@ -912,7 +928,6 @@ def validate(val_loader, model, criterion, args, logger):
     # 获取所有指标
     metrics_res = meter.compute_all_metrics()
     
-    # [修改] 返回 (指标字典, 平均Loss)
     return metrics_res, losses.avg
 
 # --- 工具类保持不变 ---
@@ -1007,6 +1022,101 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+def compute_cl_loss(model, mixed_spatial_features, preds_original, flag, criterion):
+    """
+    仿照 SpliceMix_CL.py 实现特征切分和一致性 Loss
+    :param model: Q2L 模型 (需要调用其 fc_splicemix 和 GAP)
+    :param mixed_spatial_features: [B_mix, C, H, W] 混合图的空间特征
+    :param preds_original: [B_orig, Num_Class] 原图的预测结果 (作为 Target)
+    :param flag: SpliceMix 返回的混合信息字典
+    """
+    mix_dict = flag['mix_dict']
+    mix_ind = flag['mix_ind'] # 这里的 mix_ind 可能需要根据你的 dataset 实现调整，参考下文
+    
+    # 这里的 mixed_spatial_features 对应参考代码中的 feas_m
+    # 这里的 preds_original 对应参考代码中的 preds_r
+    
+    feas_m = mixed_spatial_features
+    B, C, H, W = feas_m.shape
+    
+    preds_m_list = []   # 切分后的混合图预测 (Student)
+    preds_r_list = []   # 对应的原图预测 (Teacher)
+    
+    # 遍历每一种混合模式 (1x2, 2x2 等)
+    start_idx = 0
+    # 注意：SpliceMix.py 的实现里，mix_dict 的元素是按顺序 append 的
+    # 所以我们需要按顺序处理 mixed_spatial_features
+    
+    for i in range(len(mix_dict['rand_inds'])):
+        rand_ind = mix_dict['rand_inds'][i] # 这一组混合涉及的原图索引
+        g_row = mix_dict['rows'][i]
+        g_col = mix_dict['cols'][i]
+        n_drop = mix_dict['n_drops'][i]
+        drop_ind = mix_dict['drop_inds'][i]
+        
+        # 计算这一组产生了多少张混合图
+        # rand_ind 的长度是总原图数，除以网格大小 = 混合图数
+        ng = len(rand_ind) // (g_row * g_col)
+        
+        # 取出这一批混合图的特征
+        current_feas_m = feas_m[start_idx : start_idx + ng]
+        start_idx += ng
+        
+        # --- 核心切分逻辑 (参考 SpliceMix_CL.py) ---
+        # 如果特征图尺寸不能被网格整除，需要插值 (通常 ResNet50 的 7x7 或 14x14 很难被 2 整除，这是一个潜在坑)
+        if H % g_row != 0 or W % g_col != 0:
+             current_feas_m = torch.nn.functional.interpolate(
+                 current_feas_m, 
+                 (H // g_row * g_row, W // g_col * g_col), 
+                 mode='bilinear', align_corners=True
+             )
+        
+        # 将特征图切块
+        # split 维度 2 (高度)
+        row_chunks = current_feas_m.split(current_feas_m.shape[-2] // g_row, dim=-2) 
+        chunks = []
+        for rc in row_chunks:
+            # split 维度 3 (宽度)
+            chunks.extend(rc.split(current_feas_m.shape[-1] // g_col, dim=-1))
+            
+        # chunks 现在是一个列表，包含 (g_row * g_col) 个 tensor
+        # 每个 tensor shape: [ng, C, h', w']
+        # 我们需要把它们堆叠起来变成 [ng * grids, C, h', w']
+        # 注意顺序：SpliceMix 可能是按行优先或列优先，需要核对 SpliceMix.py 的 make_grid
+        # torchvision.make_grid 默认是行优先，所以这里直接 stack 再 view 应该是对的
+        
+        # [ng, grid_size, C, h', w'] -> [ng * grid_size, C, h', w']
+        fea_m_patches = torch.stack(chunks, dim=1).view(-1, C, chunks[0].shape[-2], chunks[0].shape[-1])
+        
+        # --- 对切好的块做预测 ---
+        # 1. GAP
+        fea_m_gp = fea_m_patches.mean(dim=[2, 3]) 
+        # 2. FC (使用模型的 fc_splicemix)
+        pred_m = model.module.fc_splicemix(fea_m_gp) # 注意 DDP 下用 model.module
+        
+        # --- 处理对应的原图 Target ---
+        # preds_original[rand_ind] 取出对应的原图预测
+        pred_r = preds_original[rand_ind]
+        
+        # 处理 Drop (如果有 patch 被丢弃，mask 掉它的 Loss)
+        if n_drop > 0:
+             # drop_ind: [Total_Source_Images] -> 0 or 1
+             mask = (drop_ind == 1)
+             # 将被 drop 的位置设为 -1e3 (sigmoid 后接近 0)，或者直接在 Loss 处 mask
+             # 参考代码的做法是 mask 填值
+             pred_m = torch.masked_fill(pred_m, mask[:, None], -1e3)
+             pred_r = torch.masked_fill(pred_r, mask[:, None], -1e3)
 
+        preds_m_list.append(pred_m)
+        preds_r_list.append(pred_r)
+        
+    # 拼合所有批次
+    preds_m_all = torch.cat(preds_m_list, dim=0)
+    preds_r_all = torch.cat(preds_r_list, dim=0)
+    
+    # 计算一致性 Loss
+    loss_cl = criterion(preds_m_all, torch.sigmoid(preds_r_all).detach())
+    
+    return loss_cl
 if __name__ == '__main__':
     main()

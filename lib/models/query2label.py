@@ -115,12 +115,18 @@ class Qeruy2Label(nn.Module):
         out_logits = self.fc(out_features)
         
         # 4. --- 路径 B: SpliceMix 分支 ---
+        # 原代码: features_pooled = src.mean(dim=[2, 3])
+        # 原代码: out_splicemix = self.fc_splicemix(features_pooled)
+        
+        # [修改] 暂时不在这里做池化和FC，而是直接把 src (空间特征) 返回去
+        # 或者为了兼容 Stage 2 的非 CL 模式，我们可以保留 Gap 分支，但额外返回 src
+        
         features_pooled = src.mean(dim=[2, 3])
         out_splicemix = self.fc_splicemix(features_pooled)
         
-        # 返回: Logits, Class_Features, Aux_Logits
-        # RoLT 需要的是 out_features (对应14个类别的特征)，而不是 memory (7x7的空间特征)
-        return out_logits, out_features, out_splicemix
+        # 返回: Logits, Class_Features, Aux_Logits, Spatial_Features(新增)
+        # src 的 shape: [B, C, H, W] (例如 [32, 2048, 14, 14])
+        return out_logits, out_features, out_splicemix, src
     #收集除了骨干网络backbone以外的所有可训练参数,以便在优化器中对它们进行单独的配置(通常是设置更高的学习率)
     ''' 
         self.transformer: Transformer 模块（包括 Encoder 和 Decoder）的所有权重。
