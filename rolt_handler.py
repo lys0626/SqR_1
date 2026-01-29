@@ -86,7 +86,7 @@ class RoLT_Handler:
                 
                 # Q2L Forward: 返回 (logits, last_layer_feats)
                 # last_layer_feats shape: [Batch, Num_Classes, Feature_Dim]
-                logits, features, _ = self.model(images)
+                logits, features, _,_ = self.model(images)
                 
                 # --- Masking Logic ---
                 # 仅保留 Target=1 对应的 Query Slot 特征

@@ -777,6 +777,10 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
                 # 注意：mixed_images_all 应该只包含混合后的图，不包含原图
                 # 参考 SpliceMix.py，它返回的是 torch.cat([inputs, inputs_mix_g])
                 # 所以我们需要根据 mix_ind 分离出纯混合图
+                # --- [新增/修复] 必须先定义 clean 样本，否则下面会报错！---
+                images_clean = images[clean_idxs]
+                targets_clean = target[clean_idxs]
+                # ----------------------------------------------------
                 mixed_images_all, mixed_targets_all, flag = splicemix_augmentor(images_clean, targets_clean)
                 
                 mix_ind = flag['mix_ind'] # 0 是原图, 1 是混合图
@@ -786,16 +790,24 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
                     # [修改] 接收第4个返回值 src
                     _, _, out_gap_all, src_all = model(mixed_images_all)
                     
-                    # 分离原图和混合图
+                    # 3.分离原图和混合图
                     # out_gap_mixed 是全图 GAP 结果，用于计算基础分类 Loss
+                    # --- 原图部分 ---
                     logits_original = out_gap_all[mix_ind == 0]
-                    logits_mixed_global = out_gap_all[mix_ind == 1]
-                    targets_mixed_global = mixed_targets_all[mix_ind == 1]
+                    targets_original = mixed_targets_all[mix_ind == 0]
+                    # --- 混合图部分 ---
+                    logits_mixed = out_gap_all[mix_ind == 1]
+                    targets_mixed = mixed_targets_all[mix_ind == 1]
                     
-                    # 3. 基础分类 Loss (针对混合图的全局标签)
-                    loss_splicemix = criterion(logits_mixed_global, targets_mixed_global)
+                    # 4. 计算基础分类 Loss (Classification Loss)
+                    # [关键修改] 同时计算原图和混合图的分类 Loss
+                    loss_mixed = criterion(logits_mixed, targets_mixed)
+                    loss_original = criterion(logits_original, targets_original)
                     
-                    # 4. [修改] SpliceMix-CL 一致性损失
+                    # 基础 Loss 是两者的总和 (你也可以给它们加权重，比如 0.5 * loss_original)
+                    loss_splicemix = loss_mixed + loss_original
+
+                    # 5. [修改] SpliceMix-CL 一致性损失
                     if args.splicemix_mode == 'SpliceMix-CL':
                         # 获取混合图的空间特征
                         src_mixed = src_all[mix_ind == 1]
@@ -824,7 +836,7 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             with torch.cuda.amp.autocast(enabled=args.amp):
                 # 前向传播所有原始图片
                 # [关键] Stage 1 训练 Q2L Transformer，取第1个返回值 out_trans_all
-                out_trans_all, _, _ = model(images)
+                out_trans_all, _,out_splicemix, _ = model(images)
                 # 2. [修改] 判断是否处于 RoLT 预热期
                 #    如果当前 epoch 小于设定的启动轮数，强制进行普通的监督训练
                 if epoch < args.rolt_start_epoch:
@@ -909,7 +921,7 @@ def validate(val_loader, model, criterion, args, logger, epoch=None):  # <--- [�
         # 混合精度上下文
         with torch.cuda.amp.autocast(enabled=args.amp):
             # <--- [修改2] 获取模型的所有输出 (Transformer分支, 特征, SpliceMix分支)
-            out_logits, _, out_splicemix = model(images)
+            out_logits, _, out_splicemix,_ = model(images)
             
             # <--- [修改3] 核心逻辑：根据阶段选择正确的分支进行评估
             # 如果提供了 epoch 且处于 Stage 1 (Warmup 阶段)

@@ -23,7 +23,7 @@ class SpliceMix(object):
         self.grids = grids
         self.n_grids = n_grids
         self.use_asym = True
-        self.config_default = {'1x2': .7, '2x2': .3, '2x3': .0, 'drop_rate': .3}#原论文中采用的
+        self.config_default = {'1x2': .7, '2x2': .3, '2x3': .0, 'drop_rate': 0}#原论文中采用的
         #以下是只采用2*2数据增强，并且不丢弃块
         # self.config_default = {'1x2': 1, '2x2': -1, '2x3': 1, 'drop_rate': 0}
         self.mixer = self.Smix if self.Mini == False else self.Smix_minimalism

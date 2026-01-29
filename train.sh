@@ -2,9 +2,9 @@
 # --- [新增] 强制使用 Conda 环境的动态库 ---
 export LD_PRELOAD=/home/dsj/anaconda3/envs/lys2/lib/libstdc++.so.6
 # --- [新增] 设置分布式训练的主节点信息 (单机训练必须配置) ---
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=0
 export MASTER_ADDR='localhost'
-export MASTER_PORT='12362'
+export MASTER_PORT='12352'
 # --- 配置区域 ---
 # 数据集名称: mimic 或 nih
 DATANAME="nih"
@@ -12,9 +12,9 @@ DATA_DIR="/data/nih-chest-xrays"
 HIDDEN_DIM=512
 DIM_FEEDFORWARD=2048
 OPTIM="AdamW"   # 注意：main_mlc.py 中要求是 'AdamW' (区分大小写)，不要写成 'Adamw'
-OPTIM_STAGE2="AdamW"
+OPTIM_STAGE2="SGD"
 LR="5e-5"
-LR_STAGE2="5e-5"
+LR_STAGE2="0.05"
 DEC_LAYERS=2
 NHEADS=4
 BATCH_SIZE=32
@@ -22,8 +22,9 @@ SCHEDULER=OneCycle
 SCHEDULER_STAGE2=StepLR
 WD=1e-4
 SPLICEMIX_START_EPOCH=20
+SPLICEMIX_MODE="SpliceMix"
 # 输出目录
-OUTPUT_DIR="./experiment/${DATANAME}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SCHEDULER_STAGE2}_${SPLICEMIX_START_EPOCH}_-2_1_NO"
+OUTPUT_DIR="./experiment/${DATANAME}_${SPLICEMIX_MODE}_${HIDDEN_DIM}_${DIM_FEEDFORWARD}_${OPTIM}_${OPTIM_STAGE2}_${LR}_${LR_STAGE2}_${DEC_LAYERS}_${BATCH_SIZE}_${SCHEDULER}_${SCHEDULER_STAGE2}_${SPLICEMIX_START_EPOCH}_-2_1"
 # 类别数 (MIMIC-CXR通常是13或14，NIH是14，请根据实际情况修改)
 NUM_CLASS=14
 
@@ -36,8 +37,9 @@ NUM_CLASS=14
 # 下面是单机单卡示例:
 
 python main_mlc.py \
-  --resume /data/dsj/lys/SqR-main/experiment/nih_512_2048_AdamW_SGD_5e-5_0.05_2_32_OneCycle_StepLR_20_-2_1_NO/checkpoint_stage1_final.pth.tar \
+  --resume /data/dsj/lys/SqR-main/experiment/index/nih_512_2048_AdamW_SGD_5e-5_0.05_2_32_OneCycle_StepLR_20_-2_1_NO/checkpoint_stage1_final.pth.tar \
   --dataname ${DATANAME} \
+  --splicemix_mode ${SPLICEMIX_MODE} \
   --dataset_dir ${DATA_DIR} \
   --img_size 224 \
   --num_class ${NUM_CLASS} \
@@ -49,7 +51,7 @@ python main_mlc.py \
   --lr ${LR} \
   --lr_stage2 ${LR_STAGE2} \
   --workers 4 \
-  --epochs 100 \
+  --epochs 120 \
   --start-epoch 20 \
   --pretrained \
   --momentum 0.9 \
